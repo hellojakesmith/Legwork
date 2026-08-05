@@ -10,6 +10,7 @@ export function summarizeRuns(runs: RunRecord[]): ObservationSummary {
   );
   const failureMessages = new Map<string, number>();
   let browserErrorCount = 0;
+  let browserChallengeCount = 0;
 
   for (const run of runs) {
     for (const event of run.events) {
@@ -18,6 +19,9 @@ export function summarizeRuns(runs: RunRecord[]): ObservationSummary {
       }
       if (event.type === "browser.error") {
         browserErrorCount += 1;
+      }
+      if (event.type === "browser.challenge") {
+        browserChallengeCount += 1;
       }
     }
   }
@@ -33,5 +37,6 @@ export function summarizeRuns(runs: RunRecord[]): ObservationSummary {
       .slice(0, 5)
       .map(([message, count]) => ({ message, count })),
     browserErrorCount,
+    browserChallengeCount,
   };
 }

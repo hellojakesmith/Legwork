@@ -1,11 +1,30 @@
 import express from "express";
 import cors from "cors";
 import { createPlatform } from "../runtime/platform.js";
-import { planGoal } from "../core/planner.js";
 import { PlaywrightBrowserAgent } from "../browser/playwright-browser-agent.js";
+import type { BrowserAgent } from "../browser/browser-agent.js";
 import type { TaskPlan } from "../core/types.js";
+import type { GoalContext, RuntimeCredentials } from "../core/types.js";
 
 const platform = createPlatform();
+
+async function finalizeBrowserSession(runId: string, runStatus: string, browserAgent: BrowserAgent | null | undefined): Promise<void> {
+  if (runStatus === "waiting_for_approval") {
+    if (browserAgent) {
+      platform.sessions.setBrowserSession(runId, browserAgent);
+    }
+    return;
+  }
+
+  platform.sessions.clearBrowserSession(runId);
+  if (browserAgent) {
+    await browserAgent.close().catch(() => undefined);
+  }
+
+  if (runStatus === "completed" || runStatus === "failed" || runStatus === "canceled") {
+    platform.sessions.clearRunCredentialSession(runId);
+  }
+}
 
 export const app = express();
 app.use(cors());
@@ -19,9 +38,46 @@ app.get("/api/agents", (_req, res) => {
   res.json(platform.improvement.agents());
 });
 
-app.post("/api/plan", (req, res) => {
+app.get("/api/credential-sessions", (_req, res) => {
+  res.json(platform.sessions.credentialVault.list().map((session) => ({
+    id: session.id,
+    label: session.label,
+    createdAt: session.createdAt,
+    expiresAt: session.expiresAt,
+  })));
+});
+
+app.post("/api/credential-sessions", (req, res) => {
+  const credentials = req.body?.credentials as RuntimeCredentials | undefined;
+  if (!credentials || typeof credentials !== "object") {
+    res.status(400).json({ error: "credentials are required" });
+    return;
+  }
+  const label = typeof req.body?.label === "string" ? req.body.label : undefined;
+  const ttlMs = typeof req.body?.ttlMs === "number" ? req.body.ttlMs : undefined;
+  const session = platform.sessions.credentialVault.create({ label, credentials, ttlMs });
+  res.status(201).json({
+    id: session.id,
+    label: session.label,
+    createdAt: session.createdAt,
+    expiresAt: session.expiresAt,
+  });
+});
+
+app.delete("/api/credential-sessions/:id", (req, res) => {
+  const deleted = platform.sessions.credentialVault.delete(req.params.id);
+  if (!deleted) {
+    res.status(404).json({ error: "credential session not found" });
+    return;
+  }
+  res.status(204).end();
+});
+
+app.post("/api/plan", async (req, res) => {
   const goal = typeof req.body?.goal === "string" ? req.body.goal : "";
-  const context = typeof req.body?.context === "string" ? req.body.context : undefined;
+  const context = typeof req.body?.context === "string" || (req.body?.context && typeof req.body.context === "object")
+    ? (req.body.context as string | GoalContext)
+    : undefined;
   const inputs = req.body?.inputs && typeof req.body.inputs === "object" ? (req.body.inputs as Record<string, unknown>) : undefined;
 
   if (!goal.trim()) {
@@ -29,7 +85,7 @@ app.post("/api/plan", (req, res) => {
     return;
   }
 
-  const plan = planGoal({
+  const plan = await platform.createPlan({
     goal,
     ...(context ? { context } : {}),
     ...(inputs ? { inputs } : {}),
@@ -57,11 +113,15 @@ app.post("/api/runs", async (req, res) => {
     return;
   }
 
+  const context = typeof req.body?.context === "string" || (req.body?.context && typeof req.body.context === "object")
+    ? (req.body.context as string | GoalContext)
+    : undefined;
+  const credentialSessionId = typeof req.body?.credentialSessionId === "string" ? req.body.credentialSessionId : undefined;
   const plan = req.body?.plan
     ? (req.body.plan as TaskPlan)
-    : planGoal({
+    : await platform.createPlan({
         goal,
-        ...(typeof req.body?.context === "string" ? { context: req.body.context } : {}),
+        ...(context ? { context } : {}),
         ...(req.body?.inputs && typeof req.body.inputs === "object" ? { inputs: req.body.inputs as Record<string, unknown> } : {}),
       });
   const browserMode = req.body?.browser !== false;
@@ -70,9 +130,22 @@ app.post("/api/runs", async (req, res) => {
   try {
     const run = await platform.engine.start(plan, {
       ...(browserAgent ? { browserAgent } : {}),
+      ...(credentialSessionId ? { credentialSessionId } : {}),
+      ...(credentialSessionId
+        ? {
+            resolveCredentials: async (id) => platform.sessions.credentialVault.get(id)?.credentials,
+          }
+        : {}),
     });
+    if (credentialSessionId) {
+      platform.sessions.setRunCredentialSession(run.id, credentialSessionId);
+    }
+    await finalizeBrowserSession(run.id, run.status, browserAgent);
     res.status(201).json(run);
   } catch (error) {
+    if (browserAgent) {
+      await browserAgent.close().catch(() => undefined);
+    }
     res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
   }
 });
@@ -80,9 +153,23 @@ app.post("/api/runs", async (req, res) => {
 app.post("/api/runs/:id/approve", async (req, res) => {
   try {
     await platform.engine.approve(req.params.id, platform.runStore);
+    const browserAgent = platform.sessions.takeBrowserSession(req.params.id) ?? ((typeof req.body?.browser !== "boolean" || req.body.browser) ? new PlaywrightBrowserAgent(true) : undefined);
+    const credentialSessionId = typeof req.body?.credentialSessionId === "string"
+      ? req.body.credentialSessionId
+      : platform.sessions.getRunCredentialSession(req.params.id);
     const run = await platform.engine.resume(req.params.id, {
-      ...(typeof req.body?.browser !== "boolean" || req.body.browser ? { browserAgent: new PlaywrightBrowserAgent(true) } : {}),
+      ...(browserAgent ? { browserAgent } : {}),
+      ...(credentialSessionId ? { credentialSessionId } : {}),
+      ...(credentialSessionId
+        ? {
+            resolveCredentials: async (id) => platform.sessions.credentialVault.get(id)?.credentials,
+          }
+        : {}),
     });
+    if (credentialSessionId) {
+      platform.sessions.setRunCredentialSession(run.id, credentialSessionId);
+    }
+    await finalizeBrowserSession(run.id, run.status, browserAgent);
     res.json(run);
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });

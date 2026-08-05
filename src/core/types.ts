@@ -1,13 +1,43 @@
-export type StepKind = "analysis" | "browser" | "approval" | "data" | "checkpoint";
+export type StepKind = "analysis" | "browser" | "approval" | "data" | "checkpoint" | "auth";
+
+export interface GoalAttachment {
+  name: string;
+  kind: "text" | "json" | "url";
+  content: string;
+}
+
+export interface GoalContext {
+  summary?: string;
+  resumeText?: string;
+  profileLinks?: string[];
+  preferences?: Record<string, unknown>;
+  constraints?: string[];
+  accountHints?: string[];
+  attachments?: GoalAttachment[];
+  credentialSessionId?: string;
+  runtimeNotes?: string;
+}
 
 export interface GoalRequest {
   goal: string;
-  context?: string;
+  context?: string | GoalContext;
   inputs?: Record<string, unknown>;
 }
 
 export interface BrowserActionSpec {
-  type: "goto" | "click" | "fill" | "type" | "extract" | "screenshot";
+  type:
+    | "goto"
+    | "click"
+    | "fill"
+    | "type"
+    | "select"
+    | "check"
+    | "uncheck"
+    | "upload"
+    | "extract"
+    | "screenshot"
+    | "login"
+    | "wait";
   url?: string;
   selector?: string;
   role?: string;
@@ -16,6 +46,11 @@ export interface BrowserActionSpec {
   placeholder?: string;
   text?: string;
   path?: string;
+  value?: string | boolean | string[];
+  filePath?: string;
+  credentialRef?: string;
+  submitSelector?: string;
+  waitFor?: string;
   timeoutMs?: number;
 }
 
@@ -26,6 +61,7 @@ export interface PlanStep {
   details: string;
   tool: "planner" | "browser" | "human" | "analysis" | "workflow";
   requiresApproval?: boolean;
+  approvalReason?: string;
   retryLimit?: number;
   browserAction?: BrowserActionSpec;
   metadata?: Record<string, unknown>;
@@ -50,13 +86,14 @@ export interface RunEvent {
     | "run.step.started"
     | "run.step.completed"
     | "run.step.failed"
-    | "run.approval.required"
-    | "run.approval.granted"
-    | "run.completed"
-    | "run.failed"
-    | "browser.action"
-    | "browser.error"
-    | "workflow.saved";
+  | "run.approval.required"
+  | "run.approval.granted"
+  | "run.completed"
+  | "run.failed"
+  | "browser.challenge"
+  | "browser.action"
+  | "browser.error"
+  | "workflow.saved";
   message: string;
   stepId?: string;
   data?: Record<string, unknown>;
@@ -66,6 +103,7 @@ export interface RunCheckpoint {
   stepIndex: number;
   awaitingApprovalForStepId?: string;
   approvedStepId?: string;
+  resumeToken?: string;
 }
 
 export interface RunRecord {
@@ -96,6 +134,33 @@ export interface WorkflowDefinition {
   outputsSchema: Record<string, unknown>;
 }
 
+export interface RuntimeCredentials {
+  username?: string;
+  password?: string;
+  email?: string;
+  otp?: string;
+  fields?: Record<string, string>;
+  cookies?: Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    expires?: number;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: "Lax" | "Strict" | "None";
+  }>;
+  notes?: string;
+}
+
+export interface RuntimeCredentialSession {
+  id: string;
+  label?: string;
+  createdAt: string;
+  expiresAt: string;
+  credentials: RuntimeCredentials;
+}
+
 export interface ImprovementAgentDefinition {
   id: string;
   title: string;
@@ -112,6 +177,7 @@ export interface ObservationSummary {
   averageRetries: number;
   topFailureMessages: Array<{ message: string; count: number }>;
   browserErrorCount: number;
+  browserChallengeCount: number;
 }
 
 export interface ImprovementProposal {

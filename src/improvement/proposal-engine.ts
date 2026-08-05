@@ -5,7 +5,7 @@ import type { ImprovementProposal, ObservationSummary } from "../core/types.js";
 export function generateProposals(summary: ObservationSummary): ImprovementProposal[] {
   const proposals: ImprovementProposal[] = [];
 
-  if (summary.browserErrorCount > 0 || summary.averageRetries >= 1) {
+  if (summary.browserErrorCount > 0 || summary.browserChallengeCount > 0 || summary.averageRetries >= 1) {
     proposals.push({
       id: createId("proposal"),
       createdAt: nowIso(),
@@ -15,12 +15,14 @@ export function generateProposals(summary: ObservationSummary): ImprovementPropo
       evidence: [
         `Average retries: ${summary.averageRetries.toFixed(2)}`,
         `Browser errors observed: ${summary.browserErrorCount}`,
+        `Browser challenges observed: ${summary.browserChallengeCount}`,
       ],
       targetAgent: "engineer",
       implementationNotes: [
         "Add more fallback locators and selector heuristics.",
         "Capture state snapshots after transient failures.",
         "Tighten retry/backoff policy for page changes.",
+        "Add explicit challenge detection for CAPTCHA and login walls.",
       ],
     });
   }

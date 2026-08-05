@@ -1,5 +1,6 @@
 import { createId } from "../shared/ids.js";
 import { nowIso } from "../shared/time.js";
+import { normalizeGoalContext } from "./context.js";
 import type { BrowserActionSpec, GoalRequest, PlanStep, TaskPlan } from "./types.js";
 
 const irreversibleVerbs = [
@@ -14,9 +15,12 @@ const irreversibleVerbs = [
   "approve",
   "apply",
   "sign",
+  "withdraw",
+  "transfer",
 ];
 
-const browserVerbs = ["browser", "website", "web", "site", "form", "page", "click", "open", "navigate", "fill", "extract", "compare"];
+const browserVerbs = ["browser", "website", "web", "site", "form", "page", "click", "open", "navigate", "fill", "extract", "compare", "upload", "download"];
+const authVerbs = ["login", "log in", "sign in", "authenticate", "account", "dashboard", "portal", "member"];
 
 function splitGoal(goal: string): string[] {
   return goal
@@ -38,8 +42,20 @@ function inferAction(clause: string): BrowserActionSpec | undefined {
     return { type: "fill", selector: "input, textarea", text: clause };
   }
 
+  if (lower.includes("login") || lower.includes("log in") || lower.includes("sign in") || lower.includes("authenticate")) {
+    return { type: "login", submitSelector: "button[type='submit'], button, input[type='submit']" };
+  }
+
   if (lower.includes("click") || lower.includes("select")) {
     return { type: "click", selector: "button, a, [role='button']", name: clause };
+  }
+
+  if (lower.includes("check") || lower.includes("toggle")) {
+    return { type: "check", selector: "input[type='checkbox']" };
+  }
+
+  if (lower.includes("upload")) {
+    return { type: "upload", selector: "input[type='file']" };
   }
 
   if (lower.includes("screenshot")) {
@@ -56,18 +72,19 @@ function inferAction(clause: string): BrowserActionSpec | undefined {
 function stepFromClause(clause: string, index: number): PlanStep {
   const action = inferAction(clause);
   const lower = clause.toLowerCase();
-  const needsApproval = irreversibleVerbs.some((verb) => lower.includes(verb));
-  const isBrowserTask = browserVerbs.some((verb) => lower.includes(verb)) || Boolean(action);
+  const needsApproval = irreversibleVerbs.some((verb) => lower.includes(verb)) || lower.includes("login") || lower.includes("log in") || lower.includes("sign in") || lower.includes("authenticate");
+  const isBrowserTask = browserVerbs.some((verb) => lower.includes(verb)) || authVerbs.some((verb) => lower.includes(verb)) || Boolean(action);
 
   if (action) {
     return {
       id: createId(`step_${index}`),
-      kind: "browser",
+      kind: action.type === "login" ? "auth" : "browser",
       title: clause,
       details: `Browser action derived from: ${clause}`,
       tool: "browser",
       retryLimit: 3,
       requiresApproval: needsApproval,
+      ...(needsApproval ? { approvalReason: "Login or irreversible action requires confirmation before execution." } : {}),
       browserAction: action,
       metadata: { sourceClause: clause },
     };
@@ -82,6 +99,7 @@ function stepFromClause(clause: string, index: number): PlanStep {
       tool: "human",
       retryLimit: 0,
       requiresApproval: true,
+      approvalReason: "This step may change account state or submit a final action.",
       metadata: { sourceClause: clause },
     };
   }
@@ -98,6 +116,7 @@ function stepFromClause(clause: string, index: number): PlanStep {
 }
 
 export function planGoal(request: GoalRequest): TaskPlan {
+  const normalizedContext = normalizeGoalContext(request.context);
   const clauses = splitGoal(request.goal);
   const browserHeavy = clauses.some((clause) => browserVerbs.some((verb) => clause.toLowerCase().includes(verb)));
   const steps: PlanStep[] = [];
@@ -106,10 +125,10 @@ export function planGoal(request: GoalRequest): TaskPlan {
     id: createId("step_0"),
     kind: "analysis",
     title: "Clarify objective and constraints",
-    details: request.context ? `Use provided context and inputs. Context: ${request.context}` : "Derive the task shape and identify required inputs.",
+    details: normalizedContext ? `Use provided context and inputs. Context: ${normalizedContext.summary}` : "Derive the task shape and identify required inputs.",
     tool: "planner",
     retryLimit: 0,
-    metadata: { inputs: request.inputs ?? {} },
+    metadata: { inputs: request.inputs ?? {}, context: normalizedContext?.structured ?? {} },
   });
 
   if (browserHeavy || clauses.length > 1) {
