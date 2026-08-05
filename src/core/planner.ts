@@ -1,5 +1,6 @@
 import { createId } from "../shared/ids.js";
 import { nowIso } from "../shared/time.js";
+import { normalizeGoalContext } from "./context.js";
 import type { BrowserActionSpec, GoalRequest, PlanStep, TaskPlan } from "./types.js";
 
 const irreversibleVerbs = [
@@ -14,9 +15,14 @@ const irreversibleVerbs = [
   "approve",
   "apply",
   "sign",
+  "withdraw",
+  "transfer",
 ];
 
-const browserVerbs = ["browser", "website", "web", "site", "form", "page", "click", "open", "navigate", "fill", "extract", "compare"];
+const browserVerbs = ["browser", "website", "web", "site", "form", "page", "click", "open", "navigate", "fill", "extract", "compare", "upload", "download"];
+const authVerbs = ["login", "log in", "sign in", "authenticate", "account", "dashboard", "portal", "member"];
+const searchVerbs = ["search", "find", "lookup", "research", "compare", "review", "browse"];
+const saveVerbs = ["save", "export", "report", "spreadsheet", "sheet", "csv", "document", "summary"];
 
 function splitGoal(goal: string): string[] {
   return goal
@@ -24,6 +30,15 @@ function splitGoal(goal: string): string[] {
     .split(/(?:,| then | and | after that | lastly | finally )/i)
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function hasIntent(goal: string, phrases: string[]): boolean {
+  const lower = goal.toLowerCase();
+  return phrases.some((phrase) => lower.includes(phrase));
+}
+
+function buildSearchUrl(goal: string): string {
+  return `https://duckduckgo.com/?q=${encodeURIComponent(goal)}`;
 }
 
 function inferAction(clause: string): BrowserActionSpec | undefined {
@@ -38,8 +53,20 @@ function inferAction(clause: string): BrowserActionSpec | undefined {
     return { type: "fill", selector: "input, textarea", text: clause };
   }
 
+  if (lower.includes("login") || lower.includes("log in") || lower.includes("sign in") || lower.includes("authenticate")) {
+    return { type: "login", submitSelector: "button[type='submit'], button, input[type='submit']" };
+  }
+
   if (lower.includes("click") || lower.includes("select")) {
     return { type: "click", selector: "button, a, [role='button']", name: clause };
+  }
+
+  if (lower.includes("check") || lower.includes("toggle")) {
+    return { type: "check", selector: "input[type='checkbox']" };
+  }
+
+  if (lower.includes("upload")) {
+    return { type: "upload", selector: "input[type='file']" };
   }
 
   if (lower.includes("screenshot")) {
@@ -56,18 +83,19 @@ function inferAction(clause: string): BrowserActionSpec | undefined {
 function stepFromClause(clause: string, index: number): PlanStep {
   const action = inferAction(clause);
   const lower = clause.toLowerCase();
-  const needsApproval = irreversibleVerbs.some((verb) => lower.includes(verb));
-  const isBrowserTask = browserVerbs.some((verb) => lower.includes(verb)) || Boolean(action);
+  const needsApproval = irreversibleVerbs.some((verb) => lower.includes(verb)) || lower.includes("login") || lower.includes("log in") || lower.includes("sign in") || lower.includes("authenticate");
+  const isBrowserTask = browserVerbs.some((verb) => lower.includes(verb)) || authVerbs.some((verb) => lower.includes(verb)) || Boolean(action);
 
   if (action) {
     return {
       id: createId(`step_${index}`),
-      kind: "browser",
+      kind: action.type === "login" ? "auth" : "browser",
       title: clause,
       details: `Browser action derived from: ${clause}`,
       tool: "browser",
       retryLimit: 3,
       requiresApproval: needsApproval,
+      ...(needsApproval ? { approvalReason: "Login or irreversible action requires confirmation before execution." } : {}),
       browserAction: action,
       metadata: { sourceClause: clause },
     };
@@ -82,6 +110,7 @@ function stepFromClause(clause: string, index: number): PlanStep {
       tool: "human",
       retryLimit: 0,
       requiresApproval: true,
+      approvalReason: "This step may change account state or submit a final action.",
       metadata: { sourceClause: clause },
     };
   }
@@ -98,18 +127,21 @@ function stepFromClause(clause: string, index: number): PlanStep {
 }
 
 export function planGoal(request: GoalRequest): TaskPlan {
+  const normalizedContext = normalizeGoalContext(request.context);
   const clauses = splitGoal(request.goal);
   const browserHeavy = clauses.some((clause) => browserVerbs.some((verb) => clause.toLowerCase().includes(verb)));
+  const wantsSearch = hasIntent(request.goal, searchVerbs);
+  const wantsSave = hasIntent(request.goal, saveVerbs);
   const steps: PlanStep[] = [];
 
   steps.push({
     id: createId("step_0"),
     kind: "analysis",
     title: "Clarify objective and constraints",
-    details: request.context ? `Use provided context and inputs. Context: ${request.context}` : "Derive the task shape and identify required inputs.",
+    details: normalizedContext ? `Use provided context and inputs. Context: ${normalizedContext.summary}` : "Derive the task shape and identify required inputs.",
     tool: "planner",
     retryLimit: 0,
-    metadata: { inputs: request.inputs ?? {} },
+    metadata: { inputs: request.inputs ?? {}, context: normalizedContext?.structured ?? {} },
   });
 
   if (browserHeavy || clauses.length > 1) {
@@ -123,16 +155,32 @@ export function planGoal(request: GoalRequest): TaskPlan {
     });
   }
 
+  if (browserHeavy || wantsSearch || wantsSave) {
+    steps.push({
+      id: createId("step_search"),
+      kind: "browser",
+      title: "Locate relevant source pages",
+      details: "Open a search results page or known target source to find the information needed to complete the goal.",
+      tool: "browser",
+      retryLimit: 2,
+      browserAction: {
+        type: "goto",
+        url: buildSearchUrl(`${request.goal} ${normalizedContext?.summary ?? ""}`.trim()),
+      },
+      metadata: { source: "deterministic-search" },
+    });
+  }
+
   clauses.forEach((clause, index) => {
     steps.push(stepFromClause(clause, index + 1));
   });
 
-  if (/spreadsheet|sheet|csv|table|report|compare/i.test(request.goal)) {
+  if (wantsSave || /spreadsheet|sheet|csv|table|report|compare/i.test(request.goal)) {
     steps.push({
       id: createId("step_result"),
       kind: "data",
-      title: "Consolidate results for review",
-      details: "Normalize collected data and make it ready for a spreadsheet, report, or structured export.",
+      title: "Summarize and save results",
+      details: "Consolidate the collected data into a reviewable summary, spreadsheet-friendly structure, or exportable result.",
       tool: "analysis",
       retryLimit: 1,
     });

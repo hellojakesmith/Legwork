@@ -23,6 +23,7 @@ The system is intentionally file-backed first. That keeps the V1 stack easy to r
 - `src/workflows/` - reusable workflow storage and replay helpers
 - `src/improvement/` - internal agents, observation analysis, proposal generation, branch/PR services
 - `src/server/` - Express API
+- `src/runtime/` - in-memory credential vault and browser session registry
 - `web/` - React dashboard
 - `test/` - unit tests for the core behaviors
 - `.legwork/` - runtime artifacts created at execution time
@@ -46,11 +47,11 @@ flowchart TD
 `src/core/planner.ts` converts a goal into a deterministic plan. It:
 
 - Splits the goal into clauses
-- Infers browser-oriented steps
-- Marks potentially irreversible work with approval gates
+- Infers browser-oriented steps, including a seeded search step for browser-heavy or research-oriented goals
+- Marks login, payment, account-state, and other irreversible work with approval gates
 - Appends checkpoint and consolidation steps
 
-This is intentionally simple. It is good enough for the foundation and easy to replace with an LLM-backed planner later.
+`src/core/plan-service.ts` adds an optional LLM-assisted planner when `OPENAI_API_KEY` is available. The deterministic planner remains the fallback, so the system is still usable without networked model access. The UI requests a fresh plan from the current goal and context before review or execution, so edits do not reuse stale task lists.
 
 ### Execution Engine
 
@@ -64,17 +65,29 @@ Behavior:
 - Pauses on approval gates
 - Persists checkpoints after every state change
 - Supports `resume()` from a saved checkpoint
+- Supports detached background execution so the UI can poll live progress while work continues
+- Captures a screenshot artifact after browser-oriented steps for review
+- Writes a final `summary.md` and `summary.json` artifact into `.legwork/artifacts/runs/<runId>/`
 
 ### Browser Agent
 
 `src/browser/playwright-browser-agent.ts` wraps Playwright and adds practical recovery:
 
 - Fallback locator resolution for selectors, labels, placeholders, roles, and text
+- Login support using runtime-supplied credentials only
+- Select, checkbox, upload, wait, and structured extraction helpers
 - Transient error detection
 - Retry with page reload and backoff
+- CAPTCHA, 2FA, login-wall, and other challenge detection
 - Screenshot capture into `.legwork/artifacts`
 
 The browser agent is a concrete implementation, not a mock. It can be used directly from the execution engine or from future specialized agents.
+
+### Runtime Sessions
+
+`src/runtime/credential-vault.ts` stores credentials only in memory, keyed by ephemeral session id. `src/runtime/session-registry.ts` keeps paused browser sessions alive across approval gates when the process remains up.
+
+Credentials are never written to `.legwork/` or any other local file by the app. Runs refer to a runtime credential session id, not to raw secrets.
 
 ### Persistence
 
@@ -136,6 +149,9 @@ The implementation deliberately does not merge or deploy anything. Human approva
 `src/server/app.ts` exposes a small JSON API:
 
 - `POST /api/plan`
+- `GET /api/credential-sessions`
+- `POST /api/credential-sessions`
+- `DELETE /api/credential-sessions/:id`
 - `POST /api/runs`
 - `POST /api/runs/:id/approve`
 - `GET /api/runs`
@@ -157,15 +173,44 @@ The workflow record stores:
 - Mermaid rendering
 - Placeholder input/output schemas
 
+`WorkflowStore.replay()` returns the goal plus caller-supplied overrides. That is enough to re-run a successful flow with new runtime inputs while keeping the captured structure intact.
+
 That is enough to support re-running and later enriching the workflow with richer parameters.
+
+## UI Flow
+
+The UI is arranged around four visible phases:
+
+1. Goal entry
+2. Planned task list
+3. Live execution progress
+4. Final results and artifacts
+
+Technical controls such as runtime credentials, preferences, workflows, and self-improvement internals are tucked into collapsible sections so the main flow stays focused.
+
+The live run panel shows the current step, recent events, and the latest screenshot artifact when browser work is in flight. When a run completes, the results panel surfaces the final summary artifact and collected outputs.
+
+## Self-Improvement Boundary
+
+The controlled improvement loop is intentionally fenced:
+
+- Agents can observe, analyze, propose, branch, test, and open draft PRs
+- Agents cannot merge to main
+- Agents cannot deploy
+- Human approval is required at the PR boundary
+
+That keeps the "self-improvement" system practical and reviewable instead of autonomous in the unsafe sense.
 
 ## Current Gaps
 
-- No LLM-based planner yet
 - No queue or worker process
 - No durable database
 - No structured spreadsheet export
 - No automated code-writing agent loop
 - No direct integration with a PR diff review system
+- No durable encrypted secret store for long-lived credentials
+- No multi-session recovery after process restart
+- No site-specific browser adapters for especially brittle portals
+- Live browser state is still in-memory, so a paused authenticated run cannot survive a server restart
 
 Those gaps are explicit. The current code is the foundation, not the end state.

@@ -11,4 +11,13 @@ describe("planGoal", () => {
     expect(plan.steps.some((step) => step.kind === "browser")).toBe(true);
     expect(plan.steps.some((step) => step.requiresApproval)).toBe(true);
   });
+
+  it("recognizes login-oriented work as an auth step", () => {
+    const plan = planGoal({
+      goal: "Log in to the insurance portal and review my policy details.",
+    });
+
+    expect(plan.steps.some((step) => step.kind === "auth")).toBe(true);
+    expect(plan.steps.some((step) => step.approvalReason?.includes("Login"))).toBe(true);
+  });
 });

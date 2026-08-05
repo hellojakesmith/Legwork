@@ -1,7 +1,11 @@
 import { createId } from "../shared/ids.js";
 import { nowIso } from "../shared/time.js";
-import type { BrowserAgent } from "../browser/browser-agent.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { BrowserChallengeError, type BrowserActionContext, type BrowserAgent } from "../browser/browser-agent.js";
 import type { BrowserActionSpec, PlanStep, RunCheckpoint, RunEvent, RunRecord, TaskPlan } from "./types.js";
+import type { RuntimeCredentials } from "./types.js";
+import { browserArtifactsDir } from "../shared/config.js";
 
 export interface RunStorage {
   save(run: RunRecord): Promise<void>;
@@ -12,8 +16,10 @@ export interface RunStorage {
 export interface ExecutionOptions {
   browserAgent?: BrowserAgent;
   requireApprovalFor?: (step: PlanStep) => boolean;
-  onEvent?: (event: RunEvent) => void;
+  onEvent?: (event: RunEvent, run?: RunRecord) => void;
   continueFromCheckpoint?: RunCheckpoint;
+  credentialSessionId?: string;
+  resolveCredentials?: (credentialSessionId: string) => Promise<RuntimeCredentials | undefined>;
 }
 
 function delay(ms: number): Promise<void> {
@@ -35,14 +41,65 @@ function createEvent(type: RunEvent["type"], message: string, stepId?: string, d
   };
 }
 
+function createBrowserContext(
+  runId: string,
+  stepId: string,
+  emit: (event: RunEvent) => void,
+  options: ExecutionOptions,
+): BrowserActionContext {
+  return {
+    runId,
+    stepId,
+    emit,
+    ...(options.credentialSessionId ? { credentialSessionId: options.credentialSessionId } : {}),
+    ...(options.resolveCredentials ? { resolveCredentials: options.resolveCredentials } : {}),
+  } satisfies BrowserActionContext;
+}
+
+async function writeSummaryArtifact(run: RunRecord, plan: TaskPlan): Promise<{ markdownPath: string; jsonPath: string; summaryText: string }> {
+  const summaryText = [
+    `Goal: ${run.goal}`,
+    `Status: ${run.status}`,
+    `Completed steps: ${run.checkpoint.stepIndex} of ${plan.steps.length}`,
+    "",
+    "Outputs:",
+    ...run.outputs.map((output) => `- ${output.label}`),
+    "",
+    "Recent events:",
+    ...run.events.slice(-8).map((event) => `- ${event.type}: ${event.message}`),
+  ].join("\n");
+
+  const relativeDir = `runs/${run.id}`;
+  const markdownPath = `${relativeDir}/summary.md`;
+  const jsonPath = `${relativeDir}/summary.json`;
+  const markdownOutput = resolve(browserArtifactsDir, markdownPath);
+  const jsonOutput = resolve(browserArtifactsDir, jsonPath);
+  await mkdir(resolve(browserArtifactsDir, relativeDir), { recursive: true });
+  await writeFile(markdownOutput, `${summaryText}\n`, "utf8");
+  await writeFile(
+    jsonOutput,
+    `${JSON.stringify({
+      goal: run.goal,
+      status: run.status,
+      completedSteps: run.checkpoint.stepIndex,
+      totalSteps: plan.steps.length,
+      outputs: run.outputs,
+      recentEvents: run.events.slice(-8),
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  return { markdownPath, jsonPath, summaryText };
+}
+
 async function executeBrowserAction(
   browserAgent: BrowserAgent,
   step: PlanStep,
   run: RunRecord,
   emit: (event: RunEvent) => void,
+  options: ExecutionOptions,
 ): Promise<unknown> {
   const action = step.browserAction as BrowserActionSpec;
-  const context = { runId: run.id, stepId: step.id, emit };
+  const context = createBrowserContext(run.id, step.id, emit, options);
 
   switch (action.type) {
     case "goto":
@@ -62,6 +119,32 @@ async function executeBrowserAction(
       return { typed: action.selector };
     case "extract":
       return { text: await browserAgent.extractText(action, context) };
+    case "login":
+      await browserAgent.login(action, context);
+      return { authenticated: true };
+    case "select":
+      if (typeof action.value !== "string" && !Array.isArray(action.value)) throw new Error("Browser select step missing value");
+      await browserAgent.select(action as { selector?: string; label?: string; value: string | string[] }, context);
+      return { selected: action.value };
+    case "check":
+      await browserAgent.check(action, context);
+      return { checked: true };
+    case "uncheck":
+      await browserAgent.uncheck(action, context);
+      return { unchecked: true };
+    case "upload":
+      if (!action.filePath) throw new Error("Browser upload step missing filePath");
+      await browserAgent.upload(action as { selector?: string; filePath: string }, context);
+      return { uploaded: action.filePath };
+    case "wait":
+      await browserAgent.wait(
+        {
+          ...(action.waitFor ? { selector: action.waitFor } : {}),
+          ...(typeof action.timeoutMs === "number" ? { timeoutMs: action.timeoutMs } : {}),
+        },
+        context,
+      );
+      return { waited: true };
     case "screenshot":
       return { path: await browserAgent.screenshot(action, context) };
     default:
@@ -83,7 +166,7 @@ export class ExecutionEngine {
     const emit = async (event: RunEvent) => {
       run.events.push(event);
       run.updatedAt = nowIso();
-      options.onEvent?.(event);
+      options.onEvent?.(event, run);
       await this.storage.save(run);
     };
 
@@ -111,9 +194,13 @@ export class ExecutionEngine {
             const output = isBrowserStep(step) && browserAgent
               ? await executeBrowserAction(browserAgent, step, run, async (event) => {
                   await emit(event);
-                })
+                }, options)
               : { note: step.details };
 
+            if (browserAgent && (step.kind === "browser" || step.kind === "auth")) {
+              const screenshotPath = await browserAgent.screenshot({ path: `runs/${run.id}/${step.id}.png` }, createBrowserContext(run.id, step.id, emit, options));
+              run.outputs.push({ label: `${step.title} screenshot`, value: { path: screenshotPath } });
+            }
             if (output !== undefined) {
               run.outputs.push({ label: step.title, value: output });
             }
@@ -121,6 +208,13 @@ export class ExecutionEngine {
             lastError = undefined;
             break;
           } catch (error) {
+            if (error instanceof BrowserChallengeError) {
+              await emit(createEvent("browser.challenge", error.challenge.message, step.id, { challengeType: error.challenge.type }));
+              run.status = "waiting_for_approval";
+              run.checkpoint.awaitingApprovalForStepId = step.id;
+              await emit(createEvent("run.approval.required", error.challenge.message, step.id, { challengeType: error.challenge.type }));
+              return run;
+            }
             lastError = error;
             await emit(createEvent("run.step.failed", error instanceof Error ? error.message : String(error), step.id, { attempt }));
             if (attempt < retries) {
@@ -143,6 +237,16 @@ export class ExecutionEngine {
       run.status = "completed";
       run.completedAt = nowIso();
       run.updatedAt = nowIso();
+      const summaryArtifact = await writeSummaryArtifact(run, plan);
+      run.outputs.push({
+        label: "Run summary",
+        value: {
+          markdownPath: summaryArtifact.markdownPath,
+          jsonPath: summaryArtifact.jsonPath,
+          summaryText: summaryArtifact.summaryText,
+        },
+      });
+      await this.storage.save(run);
       await emit(createEvent("run.completed", `Run completed for goal: ${plan.goal}`));
       return run;
     } catch (error) {
@@ -152,7 +256,9 @@ export class ExecutionEngine {
       run.updatedAt = nowIso();
       throw error;
     } finally {
-      await browserAgent?.close().catch(() => undefined);
+      if (run.status !== "waiting_for_approval") {
+        await browserAgent?.close().catch(() => undefined);
+      }
     }
   }
 
@@ -183,6 +289,34 @@ export class ExecutionEngine {
     return this.execute(run, plan, options);
   }
 
+  async startDetached(plan: TaskPlan, options: ExecutionOptions = {}): Promise<RunRecord> {
+    const run = {
+      id: createId("run"),
+      goal: plan.goal,
+      planId: plan.id,
+      status: "running" as const,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      startedAt: nowIso(),
+      checkpoint: {
+        stepIndex: options.continueFromCheckpoint?.stepIndex ?? 0,
+        ...(options.continueFromCheckpoint?.awaitingApprovalForStepId
+          ? { awaitingApprovalForStepId: options.continueFromCheckpoint.awaitingApprovalForStepId }
+          : {}),
+        ...(options.continueFromCheckpoint?.approvedStepId
+          ? { approvedStepId: options.continueFromCheckpoint.approvedStepId }
+          : {}),
+      },
+      outputs: [],
+      events: [createEvent("run.started", `Run started for goal: ${plan.goal}`)],
+      planSnapshot: plan,
+    } satisfies RunRecord;
+
+    await this.storage.save(run);
+    void this.execute(run, plan, options).catch(() => undefined);
+    return run;
+  }
+
   async resume(runId: string, options: ExecutionOptions = {}): Promise<RunRecord> {
     const run = await this.storage.load(runId);
     if (!run) {
@@ -197,7 +331,25 @@ export class ExecutionEngine {
     });
   }
 
-  async approve(runId: string, storage: RunStorage, onEvent?: (event: RunEvent) => void): Promise<RunRecord> {
+  async resumeDetached(runId: string, options: ExecutionOptions = {}): Promise<RunRecord> {
+    const run = await this.storage.load(runId);
+    if (!run) {
+      throw new Error(`Run ${runId} not found`);
+    }
+    if (run.status !== "waiting_for_approval" && run.status !== "running") {
+      throw new Error(`Run ${runId} cannot be resumed from status ${run.status}`);
+    }
+    run.status = "running";
+    run.updatedAt = nowIso();
+    await this.storage.save(run);
+    void this.execute(run, run.planSnapshot, {
+      ...options,
+      continueFromCheckpoint: run.checkpoint,
+    }).catch(() => undefined);
+    return run;
+  }
+
+  async approve(runId: string, storage: RunStorage, onEvent?: (event: RunEvent, run?: RunRecord) => void): Promise<RunRecord> {
     const run = await storage.load(runId);
     if (!run) {
       throw new Error(`Run ${runId} not found`);
@@ -214,7 +366,7 @@ export class ExecutionEngine {
     run.updatedAt = nowIso();
     const event = createEvent("run.approval.granted", `Approval granted for step ${stepId ?? "unknown"}`, stepId);
     run.events.push(event);
-    onEvent?.(event);
+    onEvent?.(event, run);
     await storage.save(run);
     return run;
   }
