@@ -47,11 +47,11 @@ flowchart TD
 `src/core/planner.ts` converts a goal into a deterministic plan. It:
 
 - Splits the goal into clauses
-- Infers browser-oriented steps
+- Infers browser-oriented steps, including a seeded search step for browser-heavy or research-oriented goals
 - Marks login, payment, account-state, and other irreversible work with approval gates
 - Appends checkpoint and consolidation steps
 
-`src/core/plan-service.ts` adds an optional LLM-assisted planner when `OPENAI_API_KEY` is available. The deterministic planner remains the fallback, so the system is still usable without networked model access.
+`src/core/plan-service.ts` adds an optional LLM-assisted planner when `OPENAI_API_KEY` is available. The deterministic planner remains the fallback, so the system is still usable without networked model access. The UI requests a fresh plan from the current goal and context before review or execution, so edits do not reuse stale task lists.
 
 ### Execution Engine
 
@@ -67,6 +67,7 @@ Behavior:
 - Supports `resume()` from a saved checkpoint
 - Supports detached background execution so the UI can poll live progress while work continues
 - Captures a screenshot artifact after browser-oriented steps for review
+- Writes a final `summary.md` and `summary.json` artifact into `.legwork/artifacts/runs/<runId>/`
 
 ### Browser Agent
 
@@ -186,6 +187,8 @@ The UI is arranged around four visible phases:
 4. Final results and artifacts
 
 Technical controls such as runtime credentials, preferences, workflows, and self-improvement internals are tucked into collapsible sections so the main flow stays focused.
+
+The live run panel shows the current step, recent events, and the latest screenshot artifact when browser work is in flight. When a run completes, the results panel surfaces the final summary artifact and collected outputs.
 
 ## Self-Improvement Boundary
 

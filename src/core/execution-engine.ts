@@ -1,8 +1,11 @@
 import { createId } from "../shared/ids.js";
 import { nowIso } from "../shared/time.js";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { BrowserChallengeError, type BrowserActionContext, type BrowserAgent } from "../browser/browser-agent.js";
 import type { BrowserActionSpec, PlanStep, RunCheckpoint, RunEvent, RunRecord, TaskPlan } from "./types.js";
 import type { RuntimeCredentials } from "./types.js";
+import { browserArtifactsDir } from "../shared/config.js";
 
 export interface RunStorage {
   save(run: RunRecord): Promise<void>;
@@ -51,6 +54,41 @@ function createBrowserContext(
     ...(options.credentialSessionId ? { credentialSessionId: options.credentialSessionId } : {}),
     ...(options.resolveCredentials ? { resolveCredentials: options.resolveCredentials } : {}),
   } satisfies BrowserActionContext;
+}
+
+async function writeSummaryArtifact(run: RunRecord, plan: TaskPlan): Promise<{ markdownPath: string; jsonPath: string; summaryText: string }> {
+  const summaryText = [
+    `Goal: ${run.goal}`,
+    `Status: ${run.status}`,
+    `Completed steps: ${run.checkpoint.stepIndex} of ${plan.steps.length}`,
+    "",
+    "Outputs:",
+    ...run.outputs.map((output) => `- ${output.label}`),
+    "",
+    "Recent events:",
+    ...run.events.slice(-8).map((event) => `- ${event.type}: ${event.message}`),
+  ].join("\n");
+
+  const relativeDir = `runs/${run.id}`;
+  const markdownPath = `${relativeDir}/summary.md`;
+  const jsonPath = `${relativeDir}/summary.json`;
+  const markdownOutput = resolve(browserArtifactsDir, markdownPath);
+  const jsonOutput = resolve(browserArtifactsDir, jsonPath);
+  await mkdir(resolve(browserArtifactsDir, relativeDir), { recursive: true });
+  await writeFile(markdownOutput, `${summaryText}\n`, "utf8");
+  await writeFile(
+    jsonOutput,
+    `${JSON.stringify({
+      goal: run.goal,
+      status: run.status,
+      completedSteps: run.checkpoint.stepIndex,
+      totalSteps: plan.steps.length,
+      outputs: run.outputs,
+      recentEvents: run.events.slice(-8),
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  return { markdownPath, jsonPath, summaryText };
 }
 
 async function executeBrowserAction(
@@ -199,6 +237,16 @@ export class ExecutionEngine {
       run.status = "completed";
       run.completedAt = nowIso();
       run.updatedAt = nowIso();
+      const summaryArtifact = await writeSummaryArtifact(run, plan);
+      run.outputs.push({
+        label: "Run summary",
+        value: {
+          markdownPath: summaryArtifact.markdownPath,
+          jsonPath: summaryArtifact.jsonPath,
+          summaryText: summaryArtifact.summaryText,
+        },
+      });
+      await this.storage.save(run);
       await emit(createEvent("run.completed", `Run completed for goal: ${plan.goal}`));
       return run;
     } catch (error) {

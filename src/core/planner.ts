@@ -21,6 +21,8 @@ const irreversibleVerbs = [
 
 const browserVerbs = ["browser", "website", "web", "site", "form", "page", "click", "open", "navigate", "fill", "extract", "compare", "upload", "download"];
 const authVerbs = ["login", "log in", "sign in", "authenticate", "account", "dashboard", "portal", "member"];
+const searchVerbs = ["search", "find", "lookup", "research", "compare", "review", "browse"];
+const saveVerbs = ["save", "export", "report", "spreadsheet", "sheet", "csv", "document", "summary"];
 
 function splitGoal(goal: string): string[] {
   return goal
@@ -28,6 +30,15 @@ function splitGoal(goal: string): string[] {
     .split(/(?:,| then | and | after that | lastly | finally )/i)
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function hasIntent(goal: string, phrases: string[]): boolean {
+  const lower = goal.toLowerCase();
+  return phrases.some((phrase) => lower.includes(phrase));
+}
+
+function buildSearchUrl(goal: string): string {
+  return `https://duckduckgo.com/?q=${encodeURIComponent(goal)}`;
 }
 
 function inferAction(clause: string): BrowserActionSpec | undefined {
@@ -119,6 +130,8 @@ export function planGoal(request: GoalRequest): TaskPlan {
   const normalizedContext = normalizeGoalContext(request.context);
   const clauses = splitGoal(request.goal);
   const browserHeavy = clauses.some((clause) => browserVerbs.some((verb) => clause.toLowerCase().includes(verb)));
+  const wantsSearch = hasIntent(request.goal, searchVerbs);
+  const wantsSave = hasIntent(request.goal, saveVerbs);
   const steps: PlanStep[] = [];
 
   steps.push({
@@ -142,16 +155,32 @@ export function planGoal(request: GoalRequest): TaskPlan {
     });
   }
 
+  if (browserHeavy || wantsSearch || wantsSave) {
+    steps.push({
+      id: createId("step_search"),
+      kind: "browser",
+      title: "Locate relevant source pages",
+      details: "Open a search results page or known target source to find the information needed to complete the goal.",
+      tool: "browser",
+      retryLimit: 2,
+      browserAction: {
+        type: "goto",
+        url: buildSearchUrl(`${request.goal} ${normalizedContext?.summary ?? ""}`.trim()),
+      },
+      metadata: { source: "deterministic-search" },
+    });
+  }
+
   clauses.forEach((clause, index) => {
     steps.push(stepFromClause(clause, index + 1));
   });
 
-  if (/spreadsheet|sheet|csv|table|report|compare/i.test(request.goal)) {
+  if (wantsSave || /spreadsheet|sheet|csv|table|report|compare/i.test(request.goal)) {
     steps.push({
       id: createId("step_result"),
       kind: "data",
-      title: "Consolidate results for review",
-      details: "Normalize collected data and make it ready for a spreadsheet, report, or structured export.",
+      title: "Summarize and save results",
+      details: "Consolidate the collected data into a reviewable summary, spreadsheet-friendly structure, or exportable result.",
       tool: "analysis",
       retryLimit: 1,
     });

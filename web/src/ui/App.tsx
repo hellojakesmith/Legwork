@@ -27,6 +27,7 @@ type RunRecord = {
   checkpoint: { stepIndex: number; awaitingApprovalForStepId?: string };
   outputs: Array<{ label: string; value: unknown }>;
   events: Array<{ id: string; at: string; type: string; message: string; stepId?: string; data?: Record<string, unknown> }>;
+  planSnapshot: TaskPlan;
   error?: string;
 };
 
@@ -103,6 +104,10 @@ function artifactUrl(pathValue: unknown): string | null {
     return null;
   }
   return `/artifacts/${pathValue.replace(/^\/+/, "")}`;
+}
+
+function latestArtifact(outputs: Array<{ label: string; value: unknown }>, predicate: (output: { label: string; value: unknown }) => boolean) {
+  return [...outputs].reverse().find(predicate);
 }
 
 function isTerminal(status: string): boolean {
@@ -197,9 +202,6 @@ export function App() {
   }, [activeRun, activeRunId]);
 
   async function getOrCreatePlan(): Promise<TaskPlan> {
-    if (plan) {
-      return plan;
-    }
     const nextPlan = await api<TaskPlan>("/api/plan", {
       method: "POST",
       body: JSON.stringify({
@@ -344,11 +346,18 @@ export function App() {
     };
   }
 
-  const activeStepIndex = activeRun ? Math.min(activeRun.checkpoint.stepIndex + 1, plan?.steps.length ?? activeRun.checkpoint.stepIndex + 1) : 0;
+  const activePlan = plan ?? activeRun?.planSnapshot ?? null;
+  const activeStepIndex = activeRun ? Math.min(activeRun.checkpoint.stepIndex + 1, activePlan?.steps.length ?? activeRun.checkpoint.stepIndex + 1) : 0;
   const currentTask = summarizeCurrentStep(activeRun ?? undefined);
-  const executionPercent = progressPercent(activeRun ?? undefined, plan);
+  const executionPercent = progressPercent(activeRun ?? undefined, activePlan);
   const outputs = activeRun?.outputs ?? [];
   const recentEvents = activeRun?.events.slice(-8) ?? [];
+  const screenshotArtifact = latestArtifact(
+    outputs,
+    (output) => typeof output.value === "object" && output.value !== null && "path" in (output.value as object) && output.label.toLowerCase().includes("screenshot"),
+  );
+  const summaryArtifact = latestArtifact(outputs, (output) => output.label === "Run summary");
+  const summaryArtifactUrl = summaryArtifact ? artifactUrl((summaryArtifact.value as { markdownPath?: unknown } | undefined)?.markdownPath) : null;
 
   return (
     <div className="app-shell">
@@ -392,15 +401,15 @@ export function App() {
             <div>
               <h2>Planned tasks</h2>
               <p className="muted">
-                {plan ? plan.summary : "Generate a plan to see the ordered, executable task list."}
+                {activePlan ? activePlan.summary : "Generate a plan to see the ordered, executable task list."}
               </p>
             </div>
-            <span className="panel-badge">{plan ? `${plan.steps.length} steps` : "No plan yet"}</span>
+            <span className="panel-badge">{activePlan ? `${activePlan.steps.length} steps` : "No plan yet"}</span>
           </div>
 
-          {plan ? (
+          {activePlan ? (
             <ol className="task-list">
-              {plan.steps.map((step, index) => (
+              {activePlan.steps.map((step, index) => (
                 <li key={step.id} className="task-card">
                   <div className="task-number">{String(index + 1).padStart(2, "0")}</div>
                   <div className="task-body">
@@ -438,10 +447,10 @@ export function App() {
           {activeRun ? (
             <>
               <div className="status-box">
-                <div>
+              <div>
                   <div className="status-title">{currentTask}</div>
                   <div className="status-subtitle">
-                    Step {activeStepIndex} of {plan?.steps.length ?? activeRun.checkpoint.stepIndex + 1}
+                    Step {activeStepIndex} of {activePlan?.steps.length ?? activeRun.checkpoint.stepIndex + 1}
                   </div>
                 </div>
                 <div className="status-progress">
@@ -480,6 +489,19 @@ export function App() {
                   </div>
                 )}
               </div>
+
+              {screenshotArtifact ? (
+                <div className="live-artifact">
+                  <strong>Latest screenshot</strong>
+                  {artifactUrl((screenshotArtifact.value as { path?: unknown }).path) ? (
+                    <img
+                      className="artifact-image"
+                      src={artifactUrl((screenshotArtifact.value as { path?: unknown }).path) ?? undefined}
+                      alt={screenshotArtifact.label}
+                    />
+                  ) : null}
+                </div>
+              ) : null}
             </>
           ) : (
             <div className="empty-state">
@@ -510,6 +532,17 @@ export function App() {
                 <strong>Completed goal</strong>
                 <p>{activeRun.goal}</p>
                 <p className="muted">Finished at {activeRun.updatedAt}</p>
+                {summaryArtifact ? (
+                  <div className="summary-block">
+                    <strong>Final summary</strong>
+                    {summaryArtifactUrl ? (
+                      <a href={summaryArtifactUrl} target="_blank" rel="noreferrer">
+                        Open summary artifact
+                      </a>
+                    ) : null}
+                    <pre>{JSON.stringify(summaryArtifact.value, null, 2)}</pre>
+                  </div>
+                ) : null}
               </div>
 
               <div className="result-artifacts">

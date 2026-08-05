@@ -428,6 +428,26 @@ textarea {
   margin-top: 16px;
 }
 
+.live-artifact,
+.summary-block {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.summary-block a {
+  display: inline-block;
+  margin-top: 6px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.summary-block a:hover {
+  text-decoration: underline;
+}
+
 .event-row {
   display: grid;
   grid-template-columns: 86px 1fr;
