@@ -74,18 +74,29 @@ function toTaskPlan(goal: string, raw: z.infer<typeof planSchema>): TaskPlan {
     assumptions: raw.assumptions,
     steps: raw.steps.map((step, index): PlanStep => {
       const browserAction = buildBrowserAction(step.browserAction);
-      return {
+      const mappedStep: PlanStep = {
         id: createId(`step_${index}`),
         kind: step.kind,
         title: step.title,
         details: step.details,
         tool: step.tool,
-        ...(typeof step.requiresApproval === "boolean" ? { requiresApproval: step.requiresApproval } : {}),
-        ...(step.approvalReason ? { approvalReason: step.approvalReason } : {}),
-        ...(typeof step.retryLimit === "number" ? { retryLimit: step.retryLimit } : {}),
-        ...(browserAction ? { browserAction } : {}),
-        ...(step.metadata ? { metadata: step.metadata } : {}),
       };
+      if (typeof step.requiresApproval === "boolean") {
+        mappedStep.requiresApproval = step.requiresApproval;
+      }
+      if (step.approvalReason) {
+        mappedStep.approvalReason = step.approvalReason;
+      }
+      if (typeof step.retryLimit === "number") {
+        mappedStep.retryLimit = step.retryLimit;
+      }
+      if (browserAction) {
+        mappedStep.browserAction = browserAction;
+      }
+      if (step.metadata) {
+        mappedStep.metadata = step.metadata;
+      }
+      return mappedStep;
     }),
   };
 }

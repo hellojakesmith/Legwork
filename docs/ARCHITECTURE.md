@@ -65,6 +65,8 @@ Behavior:
 - Pauses on approval gates
 - Persists checkpoints after every state change
 - Supports `resume()` from a saved checkpoint
+- Supports detached background execution so the UI can poll live progress while work continues
+- Captures a screenshot artifact after browser-oriented steps for review
 
 ### Browser Agent
 
@@ -174,6 +176,17 @@ The workflow record stores:
 
 That is enough to support re-running and later enriching the workflow with richer parameters.
 
+## UI Flow
+
+The UI is arranged around four visible phases:
+
+1. Goal entry
+2. Planned task list
+3. Live execution progress
+4. Final results and artifacts
+
+Technical controls such as runtime credentials, preferences, workflows, and self-improvement internals are tucked into collapsible sections so the main flow stays focused.
+
 ## Self-Improvement Boundary
 
 The controlled improvement loop is intentionally fenced:
@@ -195,5 +208,6 @@ That keeps the "self-improvement" system practical and reviewable instead of aut
 - No durable encrypted secret store for long-lived credentials
 - No multi-session recovery after process restart
 - No site-specific browser adapters for especially brittle portals
+- Live browser state is still in-memory, so a paused authenticated run cannot survive a server restart
 
 Those gaps are explicit. The current code is the foundation, not the end state.

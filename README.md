@@ -44,10 +44,10 @@ The app never stores raw secrets in `.legwork/` or in the repository. If the ser
 - Optional LLM-assisted planner when `OPENAI_API_KEY` is set
 - Playwright browser agent with retry/recovery behavior
 - Login support, structured extraction, uploads, checkbox/select controls, and challenge detection
-- Resumable execution engine with approval gates and event logs
+- Detached execution loop with live polling, approval gates, event logs, and screenshot artifacts
 - File-backed run history and workflow saving
 - Controlled improvement foundation with internal agent definitions and PR creation hooks
-- React dashboard for planning, running, and browsing history
+- React product UI centered on goal entry, task review, live execution, and final results
 
 ## What is still missing
 

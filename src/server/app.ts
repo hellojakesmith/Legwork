@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import { browserArtifactsDir } from "../shared/config.js";
 import { createPlatform } from "../runtime/platform.js";
 import { PlaywrightBrowserAgent } from "../browser/playwright-browser-agent.js";
 import type { BrowserAgent } from "../browser/browser-agent.js";
@@ -8,27 +9,29 @@ import type { GoalContext, RuntimeCredentials } from "../core/types.js";
 
 const platform = createPlatform();
 
-async function finalizeBrowserSession(runId: string, runStatus: string, browserAgent: BrowserAgent | null | undefined): Promise<void> {
-  if (runStatus === "waiting_for_approval") {
-    if (browserAgent) {
+function attachExecutionLifecycle(browserAgent: BrowserAgent | null, credentialSessionId?: string) {
+  return (event: { type: string }, run?: { id: string }) => {
+    const runId = run?.id;
+    if (!runId) {
+      return;
+    }
+    if ((event.type === "run.approval.required" || event.type === "browser.challenge") && browserAgent) {
       platform.sessions.setBrowserSession(runId, browserAgent);
     }
-    return;
-  }
-
-  platform.sessions.clearBrowserSession(runId);
-  if (browserAgent) {
-    await browserAgent.close().catch(() => undefined);
-  }
-
-  if (runStatus === "completed" || runStatus === "failed" || runStatus === "canceled") {
-    platform.sessions.clearRunCredentialSession(runId);
-  }
+    if (event.type === "run.completed" || event.type === "run.failed") {
+      platform.sessions.clearBrowserSession(runId);
+      platform.sessions.clearRunCredentialSession(runId);
+    }
+    if (credentialSessionId) {
+      platform.sessions.setRunCredentialSession(runId, credentialSessionId);
+    }
+  };
 }
 
 export const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
+app.use("/artifacts", express.static(browserArtifactsDir));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "legwork" });
@@ -128,7 +131,7 @@ app.post("/api/runs", async (req, res) => {
   const browserAgent = browserMode ? new PlaywrightBrowserAgent(true) : null;
 
   try {
-    const run = await platform.engine.start(plan, {
+    const run = await platform.engine.startDetached(plan, {
       ...(browserAgent ? { browserAgent } : {}),
       ...(credentialSessionId ? { credentialSessionId } : {}),
       ...(credentialSessionId
@@ -136,12 +139,12 @@ app.post("/api/runs", async (req, res) => {
             resolveCredentials: async (id) => platform.sessions.credentialVault.get(id)?.credentials,
           }
         : {}),
+      onEvent: attachExecutionLifecycle(browserAgent, credentialSessionId),
     });
     if (credentialSessionId) {
       platform.sessions.setRunCredentialSession(run.id, credentialSessionId);
     }
-    await finalizeBrowserSession(run.id, run.status, browserAgent);
-    res.status(201).json(run);
+    res.status(202).json(run);
   } catch (error) {
     if (browserAgent) {
       await browserAgent.close().catch(() => undefined);
@@ -157,7 +160,7 @@ app.post("/api/runs/:id/approve", async (req, res) => {
     const credentialSessionId = typeof req.body?.credentialSessionId === "string"
       ? req.body.credentialSessionId
       : platform.sessions.getRunCredentialSession(req.params.id);
-    const run = await platform.engine.resume(req.params.id, {
+    const run = await platform.engine.resumeDetached(req.params.id, {
       ...(browserAgent ? { browserAgent } : {}),
       ...(credentialSessionId ? { credentialSessionId } : {}),
       ...(credentialSessionId
@@ -165,12 +168,12 @@ app.post("/api/runs/:id/approve", async (req, res) => {
             resolveCredentials: async (id) => platform.sessions.credentialVault.get(id)?.credentials,
           }
         : {}),
+      onEvent: attachExecutionLifecycle(browserAgent ?? null, credentialSessionId),
     });
     if (credentialSessionId) {
       platform.sessions.setRunCredentialSession(run.id, credentialSessionId);
     }
-    await finalizeBrowserSession(run.id, run.status, browserAgent);
-    res.json(run);
+    res.status(202).json(run);
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
   }

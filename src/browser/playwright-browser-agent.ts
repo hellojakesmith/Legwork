@@ -346,10 +346,11 @@ export class PlaywrightBrowserAgent implements BrowserAgent {
 
   async screenshot(spec: { path?: string }, context: BrowserActionContext): Promise<string> {
     return this.withRecovery("screenshot", context, async (page) => {
-      const outputPath = spec.path ? resolve(browserArtifactsDir, spec.path) : resolve(browserArtifactsDir, `${context.runId}-${context.stepId}.png`);
+      const relativePath = spec.path ?? `runs/${context.runId}/${context.stepId}.png`;
+      const outputPath = resolve(browserArtifactsDir, relativePath);
       await mkdir(dirname(outputPath), { recursive: true });
       await page.screenshot({ path: outputPath, fullPage: true });
-      return outputPath;
+      return relativePath;
     });
   }
 

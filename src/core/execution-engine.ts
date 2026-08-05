@@ -13,7 +13,7 @@ export interface RunStorage {
 export interface ExecutionOptions {
   browserAgent?: BrowserAgent;
   requireApprovalFor?: (step: PlanStep) => boolean;
-  onEvent?: (event: RunEvent) => void;
+  onEvent?: (event: RunEvent, run?: RunRecord) => void;
   continueFromCheckpoint?: RunCheckpoint;
   credentialSessionId?: string;
   resolveCredentials?: (credentialSessionId: string) => Promise<RuntimeCredentials | undefined>;
@@ -128,7 +128,7 @@ export class ExecutionEngine {
     const emit = async (event: RunEvent) => {
       run.events.push(event);
       run.updatedAt = nowIso();
-      options.onEvent?.(event);
+      options.onEvent?.(event, run);
       await this.storage.save(run);
     };
 
@@ -159,6 +159,10 @@ export class ExecutionEngine {
                 }, options)
               : { note: step.details };
 
+            if (browserAgent && (step.kind === "browser" || step.kind === "auth")) {
+              const screenshotPath = await browserAgent.screenshot({ path: `runs/${run.id}/${step.id}.png` }, createBrowserContext(run.id, step.id, emit, options));
+              run.outputs.push({ label: `${step.title} screenshot`, value: { path: screenshotPath } });
+            }
             if (output !== undefined) {
               run.outputs.push({ label: step.title, value: output });
             }
@@ -237,6 +241,34 @@ export class ExecutionEngine {
     return this.execute(run, plan, options);
   }
 
+  async startDetached(plan: TaskPlan, options: ExecutionOptions = {}): Promise<RunRecord> {
+    const run = {
+      id: createId("run"),
+      goal: plan.goal,
+      planId: plan.id,
+      status: "running" as const,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      startedAt: nowIso(),
+      checkpoint: {
+        stepIndex: options.continueFromCheckpoint?.stepIndex ?? 0,
+        ...(options.continueFromCheckpoint?.awaitingApprovalForStepId
+          ? { awaitingApprovalForStepId: options.continueFromCheckpoint.awaitingApprovalForStepId }
+          : {}),
+        ...(options.continueFromCheckpoint?.approvedStepId
+          ? { approvedStepId: options.continueFromCheckpoint.approvedStepId }
+          : {}),
+      },
+      outputs: [],
+      events: [createEvent("run.started", `Run started for goal: ${plan.goal}`)],
+      planSnapshot: plan,
+    } satisfies RunRecord;
+
+    await this.storage.save(run);
+    void this.execute(run, plan, options).catch(() => undefined);
+    return run;
+  }
+
   async resume(runId: string, options: ExecutionOptions = {}): Promise<RunRecord> {
     const run = await this.storage.load(runId);
     if (!run) {
@@ -251,7 +283,25 @@ export class ExecutionEngine {
     });
   }
 
-  async approve(runId: string, storage: RunStorage, onEvent?: (event: RunEvent) => void): Promise<RunRecord> {
+  async resumeDetached(runId: string, options: ExecutionOptions = {}): Promise<RunRecord> {
+    const run = await this.storage.load(runId);
+    if (!run) {
+      throw new Error(`Run ${runId} not found`);
+    }
+    if (run.status !== "waiting_for_approval" && run.status !== "running") {
+      throw new Error(`Run ${runId} cannot be resumed from status ${run.status}`);
+    }
+    run.status = "running";
+    run.updatedAt = nowIso();
+    await this.storage.save(run);
+    void this.execute(run, run.planSnapshot, {
+      ...options,
+      continueFromCheckpoint: run.checkpoint,
+    }).catch(() => undefined);
+    return run;
+  }
+
+  async approve(runId: string, storage: RunStorage, onEvent?: (event: RunEvent, run?: RunRecord) => void): Promise<RunRecord> {
     const run = await storage.load(runId);
     if (!run) {
       throw new Error(`Run ${runId} not found`);
@@ -268,7 +318,7 @@ export class ExecutionEngine {
     run.updatedAt = nowIso();
     const event = createEvent("run.approval.granted", `Approval granted for step ${stepId ?? "unknown"}`, stepId);
     run.events.push(event);
-    onEvent?.(event);
+    onEvent?.(event, run);
     await storage.save(run);
     return run;
   }
