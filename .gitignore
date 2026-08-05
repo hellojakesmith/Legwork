@@ -1,0 +1,4 @@
+node_modules
+dist
+.legwork
+.DS_Store
