@@ -179,12 +179,13 @@ That is enough to support re-running and later enriching the workflow with riche
 
 ## UI Flow
 
-The UI is arranged around four visible phases:
+The UI is arranged around a single chat-first thread with the execution rails attached around it:
 
-1. Goal entry
-2. Planned task list
-3. Live execution progress
-4. Final results and artifacts
+1. Goal entry in the chat composer
+2. Plan generation and approval in the conversation
+3. Live execution progress in the thread
+4. Final results and artifacts in the same conversation
+5. Secondary sidebar controls for credentials, history, workflows, and self-improvement
 
 Technical controls such as runtime credentials, preferences, workflows, and self-improvement internals are tucked into collapsible sections so the main flow stays focused.
 
