@@ -23,6 +23,7 @@ Runtime data is stored locally in `.legwork/`:
 
 - `.legwork/runs/` - execution history and checkpoints
 - `.legwork/workflows/` - reusable workflow definitions
+- `.legwork/lead-searches/` - freelance and business lead search runs
 - `.legwork/proposals/` - improvement proposals
 - `.legwork/artifacts/` - browser screenshots and artifacts
 
@@ -50,6 +51,8 @@ The app never stores raw secrets in `.legwork/` or in the repository. If the ser
 - Chat-first React UI centered on goal entry, plan approval, live execution, and final results
 - Fresh planning from the current goal/context before review or execution, so the visible task list stays aligned with what will run
 - Secondary sidebar for credentials, context, history, and self-improvement controls
+- Dedicated Freelance Leads and Business Leads workspaces with saved-search workflows, ranked results, and detail drawers
+- Local persistence for lead search runs and lead status changes
 
 ## What is still missing
 

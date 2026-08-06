@@ -1,3 +1,4 @@
+import { LeadWorkspace } from "./LeadWorkspace.js";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type PlanStep = {
@@ -940,6 +941,54 @@ export function App() {
           </section>
         </aside>
       </div>
+    </div>
+  );
+}
+
+type AppMode = "general" | "freelance" | "business" | "workflows" | "settings";
+
+export function App() {
+  const [mode, setMode] = useState<AppMode>("general");
+
+  return (
+    <div className="mode-shell">
+      <aside className="mode-nav">
+        <div className="mode-brand">
+          <div className="mode-mark">L</div>
+          <div>
+            <strong>Legwork</strong>
+            <p>Personal VA</p>
+          </div>
+        </div>
+        <nav className="mode-tabs" aria-label="Primary">
+          <button className={`mode-tab ${mode === "general" ? "active" : ""}`} onClick={() => setMode("general")}>
+            General VA
+          </button>
+          <button className={`mode-tab ${mode === "freelance" ? "active" : ""}`} onClick={() => setMode("freelance")}>
+            Freelance Leads
+          </button>
+          <button className={`mode-tab ${mode === "business" ? "active" : ""}`} onClick={() => setMode("business")}>
+            Business Leads
+          </button>
+          <button className={`mode-tab ${mode === "workflows" ? "active" : ""}`} onClick={() => setMode("workflows")}>
+            Workflows
+          </button>
+          <button className={`mode-tab ${mode === "settings" ? "active" : ""}`} onClick={() => setMode("settings")}>
+            Settings
+          </button>
+        </nav>
+        <div className="mode-footer">
+          <div className="mode-user-mark">J</div>
+          <div>
+            <strong>Jake Smith</strong>
+            <p>Pro Plan</p>
+          </div>
+        </div>
+      </aside>
+
+      <main className="mode-panel">
+        {mode === "general" ? <GeneralVAView /> : <LeadWorkspace mode={mode} onBack={setMode} />}
+      </main>
     </div>
   );
 }

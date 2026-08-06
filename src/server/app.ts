@@ -6,6 +6,7 @@ import { PlaywrightBrowserAgent } from "../browser/playwright-browser-agent.js";
 import type { BrowserAgent } from "../browser/browser-agent.js";
 import type { TaskPlan } from "../core/types.js";
 import type { GoalContext, RuntimeCredentials } from "../core/types.js";
+import type { LeadSearchRequest, LeadStatus } from "../leads/types.js";
 
 const platform = createPlatform();
 
@@ -187,6 +188,73 @@ app.post("/api/runs/:id/workflow", async (req, res) => {
   }
   const workflow = await platform.workflowStore.saveFromRun(run, typeof req.body?.name === "string" ? req.body.name : undefined);
   res.status(201).json({ workflow, mermaid: platform.workflowStore.toMermaid(workflow) });
+});
+
+app.get("/api/lead-searches", async (_req, res) => {
+  res.json(await platform.leadSearches.list());
+});
+
+app.get("/api/lead-searches/:id", async (req, res) => {
+  const search = await platform.leadSearches.load(req.params.id);
+  if (!search) {
+    res.status(404).json({ error: "lead search not found" });
+    return;
+  }
+  res.json(search);
+});
+
+app.post("/api/lead-searches", async (req, res) => {
+  const mode = req.body?.mode === "business" ? "business" : "freelance";
+  const criteria = req.body?.criteria as LeadSearchRequest["criteria"] | undefined;
+  if (!criteria || typeof criteria !== "object") {
+    res.status(400).json({ error: "criteria are required" });
+    return;
+  }
+
+  try {
+    const credentialSessionId = typeof req.body?.credentialSessionId === "string" ? req.body.credentialSessionId : undefined;
+    const record = await platform.leadSearches.start(
+      { mode, criteria },
+      {
+        ...(credentialSessionId ? { credentialSessionId } : {}),
+        ...(credentialSessionId
+          ? {
+              resolveCredentials: async (id: string) => platform.sessions.credentialVault.get(id)?.credentials,
+            }
+          : {}),
+      },
+    );
+    res.status(202).json(record);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/lead-searches/:id/leads/:leadId/status", async (req, res) => {
+  const status = typeof req.body?.status === "string" ? req.body.status as LeadStatus : undefined;
+  if (!status) {
+    res.status(400).json({ error: "status is required" });
+    return;
+  }
+  const updated = await platform.leadSearches.updateLeadStatus(req.params.id, req.params.leadId, status);
+  if (!updated) {
+    res.status(404).json({ error: "lead search not found" });
+    return;
+  }
+  res.json(updated);
+});
+
+app.post("/api/lead-searches/:id/workflow", async (req, res) => {
+  try {
+    const result = await platform.leadSearches.saveWorkflow(req.params.id, typeof req.body?.name === "string" ? req.body.name : undefined);
+    if (!result) {
+      res.status(404).json({ error: "lead search not found" });
+      return;
+    }
+    res.status(201).json(result);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.get("/api/workflows", async (_req, res) => {
