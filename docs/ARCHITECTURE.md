@@ -10,8 +10,9 @@ The design centers on six concrete subsystems:
 2. Execution engine
 3. Browser agent
 4. History and workflow persistence
-5. Controlled self-improvement layer
-6. React dashboard and API surface
+5. Lead-generation workspaces and search persistence
+6. Controlled self-improvement layer
+7. React dashboard and API surface
 
 The system is intentionally file-backed first. That keeps the V1 stack easy to run locally, inspect, and extend before introducing queues or a database.
 
@@ -21,10 +22,11 @@ The system is intentionally file-backed first. That keeps the V1 stack easy to r
 - `src/browser/` - Playwright browser abstraction and recovery logic
 - `src/storage/` - file-backed run persistence
 - `src/workflows/` - reusable workflow storage and replay helpers
+- `src/leads/` - lead search controller, scoring, and search normalization
 - `src/improvement/` - internal agents, observation analysis, proposal generation, branch/PR services
 - `src/server/` - Express API
 - `src/runtime/` - in-memory credential vault and browser session registry
-- `web/` - React dashboard
+- `web/` - React UI for General VA, Freelance Leads, Business Leads, workflows, and settings
 - `test/` - unit tests for the core behaviors
 - `.legwork/` - runtime artifacts created at execution time
 
@@ -40,6 +42,11 @@ flowchart TD
   D --> G["Workflow store"]
   F --> H["Run history UI"]
   G --> I["Reusable workflows"]
+  J["Lead criteria"] --> K["Lead search controller"]
+  K --> L["Browser / public sources"]
+  K --> M["Lead search store"]
+  K --> G
+  M --> N["Freelance / Business lead UI"]
 ```
 
 ### Planner
@@ -93,6 +100,7 @@ Credentials are never written to `.legwork/` or any other local file by the app.
 
 `src/storage/file-run-store.ts` stores each run as JSON.
 `src/workflows/workflow-store.ts` stores successful workflows as JSON and can render them as Mermaid.
+`src/storage/lead-search-store.ts` stores freelance and business lead searches, including criteria, live events, and normalized results.
 
 This gives the app:
 
@@ -100,6 +108,18 @@ This gives the app:
 - Checkpoint state
 - Replayable workflow definitions
 - Human-inspectable artifacts without needing infrastructure
+- Persisted lead results with status changes and saved-workflow links
+
+### Lead Workspaces
+
+`src/leads/controller.ts` coordinates autonomous lead searches for:
+
+- Freelance Leads
+- Business Leads
+
+It uses the shared planner and browser agent, then persists normalized results in `.legwork/lead-searches/`.
+
+The first implementation prioritizes Freelancer.com-style freelance discovery and public web research for business leads. The architecture keeps source selection behind a reusable abstraction so additional platforms and research sources can be added later.
 
 ## Controlled Self-Improvement System
 
@@ -157,6 +177,11 @@ The implementation deliberately does not merge or deploy anything. Human approva
 - `GET /api/runs`
 - `GET /api/runs/:id`
 - `POST /api/runs/:id/workflow`
+- `GET /api/lead-searches`
+- `POST /api/lead-searches`
+- `GET /api/lead-searches/:id`
+- `POST /api/lead-searches/:id/leads/:leadId/status`
+- `POST /api/lead-searches/:id/workflow`
 - `GET /api/workflows`
 - `POST /api/improvement/analyze`
 - `POST /api/improvement/branch`
@@ -177,9 +202,11 @@ The workflow record stores:
 
 That is enough to support re-running and later enriching the workflow with richer parameters.
 
+Lead searches also save into the workflow store. That allows successful searches to become reusable search workflows without introducing a separate persistence system.
+
 ## UI Flow
 
-The UI is arranged around four visible phases:
+The UI is arranged around a light-themed workspace shell with a left navigation rail and four visible phases:
 
 1. Goal entry
 2. Planned task list

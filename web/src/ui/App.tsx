@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { LeadWorkspace } from "./LeadWorkspace.js";
 
 type PlanStep = {
   id: string;
@@ -73,6 +74,17 @@ type ImprovementProposal = {
   targetAgent: string;
 };
 
+type ChatKind = "intro" | "goal" | "note" | "warning" | "error" | "result";
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  kind: ChatKind;
+  title: string;
+  body: string;
+  createdAt: string;
+};
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     headers: { "content-type": "application/json" },
@@ -139,7 +151,48 @@ function progressPercent(run?: RunRecord, plan?: TaskPlan | null): number {
   return Math.min(100, Math.round((run.checkpoint.stepIndex / plan.steps.length) * 100));
 }
 
-export function App() {
+function formatTime(value: string): string {
+  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function makeMessage(kind: ChatKind, role: ChatMessage["role"], title: string, body: string): ChatMessage {
+  return {
+    id: `${kind}-${crypto.randomUUID()}`,
+    role,
+    kind,
+    title,
+    body,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function eventToMessage(event: { type: string; message: string }, run?: RunRecord): ChatMessage | null {
+  switch (event.type) {
+    case "run.approval.required":
+      return makeMessage("warning", "assistant", "Approval needed", event.message);
+    case "browser.challenge":
+      return makeMessage("warning", "assistant", "Browser challenge", event.message);
+    case "run.failed":
+      return makeMessage("error", "assistant", "Run failed", run?.error ?? event.message);
+    case "run.completed":
+      return makeMessage("result", "assistant", "Run finished", "The work is complete. Results and artifacts are available below.");
+    default:
+      return null;
+  }
+}
+
+function planSummary(plan: TaskPlan): string {
+  const approvals = plan.steps.filter((step) => step.requiresApproval).length;
+  const browserSteps = plan.steps.filter((step) => step.kind === "browser" || step.kind === "auth").length;
+  return `${plan.steps.length} steps · ${browserSteps} browser actions · ${approvals} approval gates`;
+}
+
+function runSummary(run: RunRecord): string {
+  const outputs = run.outputs.length;
+  return `Status: ${run.status}. Steps completed: ${Math.min(run.checkpoint.stepIndex, run.planSnapshot.steps.length)} / ${run.planSnapshot.steps.length}. Outputs collected: ${outputs}.`;
+}
+
+function GeneralVAView() {
   const [goal, setGoal] = useState("Compare business insurance providers, gather quotes, and save the results to a spreadsheet.");
   const [contextSummary, setContextSummary] = useState("");
   const [resumeText, setResumeText] = useState("");
@@ -740,6 +793,54 @@ export function App() {
           </div>
         </details>
       </section>
+    </div>
+  );
+}
+
+type AppMode = "general" | "freelance" | "business" | "workflows" | "settings";
+
+export function App() {
+  const [mode, setMode] = useState<AppMode>("general");
+
+  return (
+    <div className="mode-shell">
+      <aside className="mode-nav">
+        <div className="mode-brand">
+          <div className="mode-mark">L</div>
+          <div>
+            <strong>Legwork</strong>
+            <p>Personal VA</p>
+          </div>
+        </div>
+        <nav className="mode-tabs" aria-label="Primary">
+          <button className={`mode-tab ${mode === "general" ? "active" : ""}`} onClick={() => setMode("general")}>
+            General VA
+          </button>
+          <button className={`mode-tab ${mode === "freelance" ? "active" : ""}`} onClick={() => setMode("freelance")}>
+            Freelance Leads
+          </button>
+          <button className={`mode-tab ${mode === "business" ? "active" : ""}`} onClick={() => setMode("business")}>
+            Business Leads
+          </button>
+          <button className={`mode-tab ${mode === "workflows" ? "active" : ""}`} onClick={() => setMode("workflows")}>
+            Workflows
+          </button>
+          <button className={`mode-tab ${mode === "settings" ? "active" : ""}`} onClick={() => setMode("settings")}>
+            Settings
+          </button>
+        </nav>
+        <div className="mode-footer">
+          <div className="mode-user-mark">J</div>
+          <div>
+            <strong>Jake Smith</strong>
+            <p>Pro Plan</p>
+          </div>
+        </div>
+      </aside>
+
+      <main className="mode-panel">
+        {mode === "general" ? <GeneralVAView /> : <LeadWorkspace mode={mode} onBack={setMode} />}
+      </main>
     </div>
   );
 }
