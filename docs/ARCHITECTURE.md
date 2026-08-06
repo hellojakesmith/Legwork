@@ -208,10 +208,11 @@ Lead searches also save into the workflow store. That allows successful searches
 
 The UI is arranged around a light-themed workspace shell with a left navigation rail and four visible phases:
 
-1. Goal entry
-2. Planned task list
-3. Live execution progress
-4. Final results and artifacts
+1. Goal entry in the chat composer
+2. Plan generation and approval in the conversation
+3. Live execution progress in the thread
+4. Final results and artifacts in the same conversation
+5. Secondary sidebar controls for credentials, history, workflows, and self-improvement
 
 Technical controls such as runtime credentials, preferences, workflows, and self-improvement internals are tucked into collapsible sections so the main flow stays focused.
 

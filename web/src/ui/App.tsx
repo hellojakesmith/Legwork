@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
 import { LeadWorkspace } from "./LeadWorkspace.js";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type PlanStep = {
   id: string;
@@ -192,7 +192,7 @@ function runSummary(run: RunRecord): string {
   return `Status: ${run.status}. Steps completed: ${Math.min(run.checkpoint.stepIndex, run.planSnapshot.steps.length)} / ${run.planSnapshot.steps.length}. Outputs collected: ${outputs}.`;
 }
 
-function GeneralVAView() {
+export function App() {
   const [goal, setGoal] = useState("Compare business insurance providers, gather quotes, and save the results to a spreadsheet.");
   const [contextSummary, setContextSummary] = useState("");
   const [resumeText, setResumeText] = useState("");
@@ -212,10 +212,24 @@ function GeneralVAView() {
   const [agents, setAgents] = useState<InternalAgent[]>([]);
   const [improvementSummary, setImprovementSummary] = useState<ImprovementSummary | null>(null);
   const [improvementProposals, setImprovementProposals] = useState<ImprovementProposal[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: "intro",
+      role: "assistant",
+      kind: "intro",
+      title: "Legwork is ready",
+      body: "Tell me what you want done. I will turn it into a plan, ask for approval only when needed, and execute it with the browser.",
+      createdAt: new Date().toISOString(),
+    },
+  ]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [composerMode, setComposerMode] = useState<"plan" | "run">("plan");
+  const seenEventIds = useRef(new Set<string>());
+  const announcedPlanIds = useRef(new Set<string>());
+  const announcedRunStatus = useRef<Record<string, string>>({});
 
   async function refresh() {
     const [runData, workflowData, credentialData, agentData] = await Promise.all([
@@ -249,20 +263,145 @@ function GeneralVAView() {
 
     const interval = window.setInterval(() => {
       refresh().catch((err) => setError(err.message));
-    }, 1400);
+    }, 1200);
 
     return () => window.clearInterval(interval);
   }, [activeRun, activeRunId]);
 
-  async function getOrCreatePlan(): Promise<TaskPlan> {
+  useEffect(() => {
+    if (plan && plan.goal !== goal) {
+      setPlan(null);
+      setComposerMode("plan");
+    }
+  }, [goal, plan]);
+
+  const activePlan = plan && plan.goal === goal ? plan : null;
+  const displayedPlan = activePlan ?? (activeRun && activeRun.goal === goal ? activeRun.planSnapshot : null);
+  const outputs = activeRun?.outputs ?? [];
+  const recentEvents = activeRun?.events.slice(-6) ?? [];
+  const screenshotArtifact = latestArtifact(
+    outputs,
+    (output) => typeof output.value === "object" && output.value !== null && "path" in (output.value as object) && output.label.toLowerCase().includes("screenshot"),
+  );
+  const summaryArtifact = latestArtifact(outputs, (output) => output.label === "Run summary");
+  const summaryArtifactUrl = summaryArtifact ? artifactUrl((summaryArtifact.value as { markdownPath?: unknown } | undefined)?.markdownPath) : null;
+  const activeStatus = activeRun?.status ?? "idle";
+
+  useEffect(() => {
+    if (!displayedPlan || announcedPlanIds.current.has(displayedPlan.id)) {
+      return;
+    }
+
+    announcedPlanIds.current.add(displayedPlan.id);
+    setMessages((current) => [
+      ...current,
+      makeMessage(
+        "note",
+        "assistant",
+        "Plan ready",
+        `I turned that into ${displayedPlan.steps.length} executable steps. Review the plan card below, then approve and run.`,
+      ),
+    ]);
+  }, [displayedPlan?.id]);
+
+  useEffect(() => {
+    if (!activeRun) {
+      return;
+    }
+
+    const previousStatus = announcedRunStatus.current[activeRun.id];
+    if (previousStatus === activeRun.status) {
+      return;
+    }
+
+    announcedRunStatus.current[activeRun.id] = activeRun.status;
+    if (activeRun.status === "running") {
+      setMessages((current) => [...current, makeMessage("note", "assistant", "Taking control", "I’m executing the plan now and will only stop if I’m blocked or need approval.")]);
+    }
+    if (activeRun.status === "waiting_for_approval") {
+      setMessages((current) => [
+        ...current,
+        makeMessage(
+          "warning",
+          "assistant",
+          "Waiting for approval",
+          "I hit a high-risk or blocked step and paused for your approval. You can continue from the live card.",
+        ),
+      ]);
+    }
+    if (activeRun.status === "completed") {
+      setMessages((current) => [
+        ...current,
+        makeMessage("result", "assistant", "Work complete", "The run finished. I’ve added the summary and artifacts below."),
+      ]);
+    }
+    if (activeRun.status === "failed") {
+      setMessages((current) => [
+        ...current,
+        makeMessage("error", "assistant", "Run failed", activeRun.error ?? "I hit an error while executing the plan."),
+      ]);
+    }
+  }, [activeRun?.id, activeRun?.status, activeRun?.error]);
+
+  useEffect(() => {
+    if (!activeRun) {
+      return;
+    }
+
+    const unseen = activeRun.events.filter((event) => !seenEventIds.current.has(event.id));
+    if (unseen.length === 0) {
+      return;
+    }
+
+    for (const event of unseen) {
+      seenEventIds.current.add(event.id);
+    }
+
+    const notable = unseen
+      .map((event) => eventToMessage(event, activeRun))
+      .filter((item): item is ChatMessage => item !== null);
+
+    if (notable.length > 0) {
+      setMessages((current) => [...current, ...notable]);
+    }
+  }, [activeRun?.id, activeRun?.events.length]);
+
+  async function buildContextPayload() {
+    const preferences = safeParseJson(preferencesJson);
+    return {
+      summary: contextSummary || undefined,
+      resumeText: resumeText || undefined,
+      preferences: Object.keys(preferences).length ? preferences : undefined,
+      constraints: splitLines(constraints),
+      accountHints: splitLines(accountHints),
+      credentialSessionId: credentialSessionId || undefined,
+    };
+  }
+
+  async function createPlanFromCurrentGoal(announceGoal = true): Promise<TaskPlan> {
+    if (announceGoal) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: `user-${crypto.randomUUID()}`,
+          role: "user",
+          kind: "goal",
+          title: "New goal",
+          body: goal.trim(),
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+    }
+
     const nextPlan = await api<TaskPlan>("/api/plan", {
       method: "POST",
       body: JSON.stringify({
         goal,
-        context: buildContextPayload(),
+        context: await buildContextPayload(),
       }),
     });
     setPlan(nextPlan);
+    setComposerMode("run");
     return nextPlan;
   }
 
@@ -271,8 +410,8 @@ function GeneralVAView() {
     setError(null);
     setNotice(null);
     try {
-      await getOrCreatePlan();
-      setNotice("Plan ready. Review the task list, then run it.");
+      await createPlanFromCurrentGoal(true);
+      setNotice("Plan ready. Approve it from the chat or refine the goal and regenerate.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -285,34 +424,23 @@ function GeneralVAView() {
     setError(null);
     setNotice(null);
     try {
-      const nextPlan = await getOrCreatePlan();
+      const nextPlan = plan && plan.goal === goal ? plan : await createPlanFromCurrentGoal(true);
+      setMessages((current) => [
+        ...current,
+        makeMessage("note", "assistant", "Approve & Run", "I’m starting the autonomous run now. Live progress will appear in this thread."),
+      ]);
       const started = await api<RunRecord>("/api/runs", {
         method: "POST",
         body: JSON.stringify({
           goal,
-          context: buildContextPayload(),
+          context: await buildContextPayload(),
           plan: nextPlan,
           ...(credentialSessionId ? { credentialSessionId } : {}),
         }),
       });
       setActiveRunId(started.id);
-      setNotice("Run started. Live progress is updating below.");
+      setNotice("Run started. Watch the conversation for live progress.");
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveWorkflow(runId: string) {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await api(`/api/runs/${runId}/workflow`, { method: "POST", body: JSON.stringify({}) });
-      await refresh();
-      setNotice("Workflow saved from the completed run.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -332,8 +460,23 @@ function GeneralVAView() {
         }),
       });
       setActiveRunId(resumed.id);
-      setNotice("Approval recorded. Execution resumed in the background.");
+      setNotice("Approval recorded. Execution resumed.");
       await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveWorkflow(runId: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api(`/api/runs/${runId}/workflow`, { method: "POST", body: JSON.stringify({}) });
+      await refresh();
+      setNotice("Workflow saved from the completed run.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -387,204 +530,152 @@ function GeneralVAView() {
     }
   }
 
-  function buildContextPayload() {
-    const preferences = safeParseJson(preferencesJson);
-    return {
-      summary: contextSummary || undefined,
-      resumeText: resumeText || undefined,
-      preferences: Object.keys(preferences).length ? preferences : undefined,
-      constraints: splitLines(constraints),
-      accountHints: splitLines(accountHints),
-      credentialSessionId: credentialSessionId || undefined,
-    };
-  }
-
-  const activePlan = plan ?? activeRun?.planSnapshot ?? null;
-  const activeStepIndex = activeRun ? Math.min(activeRun.checkpoint.stepIndex + 1, activePlan?.steps.length ?? activeRun.checkpoint.stepIndex + 1) : 0;
-  const currentTask = summarizeCurrentStep(activeRun ?? undefined);
-  const executionPercent = progressPercent(activeRun ?? undefined, activePlan);
-  const outputs = activeRun?.outputs ?? [];
-  const recentEvents = activeRun?.events.slice(-8) ?? [];
-  const screenshotArtifact = latestArtifact(
-    outputs,
-    (output) => typeof output.value === "object" && output.value !== null && "path" in (output.value as object) && output.label.toLowerCase().includes("screenshot"),
-  );
-  const summaryArtifact = latestArtifact(outputs, (output) => output.label === "Run summary");
-  const summaryArtifactUrl = summaryArtifact ? artifactUrl((summaryArtifact.value as { markdownPath?: unknown } | undefined)?.markdownPath) : null;
+  const conversationMessages = useMemo(() => messages, [messages]);
 
   return (
-    <div className="app-shell">
-      <section className="hero">
-        <div className="hero-copy">
+    <div className="app-shell chat-shell">
+      <header className="topbar">
+        <div>
           <p className="eyebrow">Legwork personal VA</p>
-          <h1>Give it a goal. It plans, works, pauses only when needed, and brings back results.</h1>
-          <p className="lede">
-            The main flow is intentionally simple: describe the goal, review the task list, run it, watch live progress, and save the result as a reusable workflow.
-          </p>
-          <div className="hero-points">
-            <span>Browser automation</span>
-            <span>Runtime credentials</span>
-            <span>Approval gates</span>
-            <span>Reusable workflows</span>
-          </div>
+          <h1>Talk to your agent like ChatGPT, then let it work.</h1>
         </div>
-
-        <div className="composer">
-          <label className="field field-goal">
-            <span className="field-label">Goal</span>
-            <textarea value={goal} onChange={(event) => setGoal(event.target.value)} rows={7} placeholder="Describe the work you want done." />
-          </label>
-          <div className="composer-actions">
-            <button onClick={handleRun} disabled={busy} className="primary-button">
-              {busy ? "Working..." : "Run plan"}
-            </button>
-            <button onClick={handlePlan} disabled={busy} className="secondary-button">
-              {busy ? "Working..." : "Review plan"}
-            </button>
-          </div>
-          <p className="composer-hint">Plan first if you want a preview, or run immediately to start execution.</p>
-          {notice ? <div className="notice">{notice}</div> : null}
-          {error ? <div className="error">{error}</div> : null}
+        <div className={`presence ${activeStatus}`}>
+          <span className="presence-dot" />
+          <span>{activeStatus.replace(/_/g, " ")}</span>
         </div>
-      </section>
+      </header>
 
-      <section className="primary-grid">
-        <article className="panel panel-plan">
-          <div className="panel-header">
-            <div>
-              <h2>Planned tasks</h2>
-              <p className="muted">
-                {activePlan ? activePlan.summary : "Generate a plan to see the ordered, executable task list."}
-              </p>
-            </div>
-            <span className="panel-badge">{activePlan ? `${activePlan.steps.length} steps` : "No plan yet"}</span>
-          </div>
-
-          {activePlan ? (
-            <ol className="task-list">
-              {activePlan.steps.map((step, index) => (
-                <li key={step.id} className="task-card">
-                  <div className="task-number">{String(index + 1).padStart(2, "0")}</div>
-                  <div className="task-body">
-                    <div className="task-topline">
-                      <strong>{step.title}</strong>
-                      <span className={`pill ${step.kind}`}>{step.kind}</span>
-                    </div>
-                    <p>{step.details}</p>
-                    <div className="task-meta">
-                      {step.browserAction ? <span>Action: {step.browserAction.type}</span> : <span>Action: analysis</span>}
-                      {step.requiresApproval ? <span className="approval-chip">approval required</span> : <span>auto-runs</span>}
-                    </div>
-                    {step.approvalReason ? <p className="approval-reason">{step.approvalReason}</p> : null}
-                  </div>
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <div className="empty-state">
-              <strong>No plan yet.</strong>
-              <p>Add a goal above, then choose Review plan to inspect the task list before running it.</p>
-            </div>
-          )}
-        </article>
-
-        <article className="panel panel-run">
-          <div className="panel-header">
-            <div>
-              <h2>Live execution</h2>
-              <p className="muted">Watch the current task, progress, and live event stream.</p>
-            </div>
-            <span className={`panel-badge status ${activeRun?.status ?? "idle"}`}>{activeRun?.status ?? "idle"}</span>
-          </div>
-
-          {activeRun ? (
-            <>
-              <div className="status-box">
-              <div>
-                  <div className="status-title">{currentTask}</div>
-                  <div className="status-subtitle">
-                    Step {activeStepIndex} of {activePlan?.steps.length ?? activeRun.checkpoint.stepIndex + 1}
-                  </div>
+      <div className="chat-layout">
+        <main className="chat-main">
+          <div className="conversation" aria-live="polite">
+            {conversationMessages.map((message) => (
+              <article key={message.id} className={`chat-message ${message.role} ${message.kind}`}>
+                <div className="chat-meta">
+                  <span>{message.role === "user" ? "You" : "Legwork"}</span>
+                  <span>{formatTime(message.createdAt)}</span>
                 </div>
-                <div className="status-progress">
-                  <div className="progress-track">
-                    <div className="progress-fill" style={{ width: `${executionPercent}%` }} />
-                  </div>
-                  <span>{executionPercent}%</span>
-                </div>
-              </div>
+                <h2>{message.title}</h2>
+                <p>{message.body}</p>
+              </article>
+            ))}
 
-              {activeRun.checkpoint.awaitingApprovalForStepId ? (
-                <div className="approval-callout">
-                  <strong>Approval needed</strong>
-                  <p>Run is paused on step {activeRun.checkpoint.awaitingApprovalForStepId}.</p>
-                  <button className="secondary-button" onClick={() => approveAndResume(activeRun.id)} disabled={busy}>
-                    Approve and resume
+            {displayedPlan ? (
+              <article className="chat-message assistant plan">
+                <div className="chat-meta">
+                  <span>Legwork</span>
+                  <span>{displayedPlan.steps.length} steps</span>
+                </div>
+                <h2>Plan ready</h2>
+                <p>{displayedPlan.summary}</p>
+                <div className="plan-stats">
+                  <span>{planSummary(displayedPlan)}</span>
+                  <span>{new Date(displayedPlan.createdAt).toLocaleString()}</span>
+                </div>
+                <ol className="plan-list">
+                  {displayedPlan.steps.map((step, index) => (
+                    <li key={step.id} className="plan-step">
+                      <div className="plan-step-index">{String(index + 1).padStart(2, "0")}</div>
+                      <div className="plan-step-body">
+                        <div className="plan-step-topline">
+                          <strong>{step.title}</strong>
+                          <span className={`pill ${step.kind}`}>{step.kind}</span>
+                        </div>
+                        <p>{step.details}</p>
+                        <div className="plan-step-meta">
+                          <span>{step.browserAction ? `Action: ${step.browserAction.type}` : "Action: analysis"}</span>
+                          {step.requiresApproval ? <span className="approval-chip">approval required</span> : <span>auto-runs</span>}
+                        </div>
+                        {step.approvalReason ? <p className="approval-reason">{step.approvalReason}</p> : null}
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+                <div className="message-actions">
+                  <button onClick={handleRun} disabled={busy} className="primary-button">
+                    Approve &amp; Run
+                  </button>
+                  <button onClick={handlePlan} disabled={busy} className="secondary-button">
+                    Regenerate plan
                   </button>
                 </div>
-              ) : null}
-
-              <div className="event-stream">
-                {recentEvents.length > 0 ? (
-                  recentEvents.map((event) => (
-                    <div key={event.id} className="event-row">
-                      <span className="event-time">{new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
-                      <div>
-                        <strong>{event.type}</strong>
-                        <p>{event.message}</p>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="empty-state compact">
-                    <strong>No activity yet.</strong>
-                    <p>Start a run and this panel will stream step updates and browser events.</p>
-                  </div>
-                )}
-              </div>
-
-              {screenshotArtifact ? (
-                <div className="live-artifact">
-                  <strong>Latest screenshot</strong>
-                  {artifactUrl((screenshotArtifact.value as { path?: unknown }).path) ? (
-                    <img
-                      className="artifact-image"
-                      src={artifactUrl((screenshotArtifact.value as { path?: unknown }).path) ?? undefined}
-                      alt={screenshotArtifact.label}
-                    />
-                  ) : null}
+              </article>
+            ) : (
+              <article className="chat-message assistant intro-card">
+                <div className="chat-meta">
+                  <span>Legwork</span>
+                  <span>Ready</span>
                 </div>
-              ) : null}
-            </>
-          ) : (
-            <div className="empty-state">
-              <strong>No active run.</strong>
-              <p>Run a plan to see live progress here.</p>
-            </div>
-          )}
-        </article>
-      </section>
+                <h2>Describe the work in plain language</h2>
+                <p>
+                  I’ll create a concrete plan, pause only for real blockers or high-risk actions, and then execute the task with the browser and other tools.
+                </p>
+              </article>
+            )}
 
-      <section className="primary-grid secondary-grid">
-        <article className="panel panel-results">
-          <div className="panel-header">
-            <div>
-              <h2>Results</h2>
-              <p className="muted">{activeRun?.status === "completed" ? "A finished run summary and its artifacts appear here." : "When a run completes, this panel turns into the final result view."}</p>
-            </div>
-            {activeRun?.status === "completed" ? (
-              <button className="secondary-button" onClick={() => saveWorkflow(activeRun.id)} disabled={busy}>
-                Save workflow
-              </button>
+            {activeRun ? (
+              <article className="chat-message assistant live-card">
+                <div className="chat-meta">
+                  <span>Legwork live</span>
+                  <span className={`pill ${activeRun.status}`}>{activeRun.status}</span>
+                </div>
+                <h2>{summarizeCurrentStep(activeRun)}</h2>
+                <p>{runSummary(activeRun)}</p>
+                <div className="progress-shell">
+                  <div className="progress-track">
+                    <div className="progress-fill" style={{ width: `${progressPercent(activeRun, activePlan)}%` }} />
+                  </div>
+                  <span>{progressPercent(activeRun, activePlan)}%</span>
+                </div>
+                {activeRun.checkpoint.awaitingApprovalForStepId ? (
+                  <div className="approval-callout inline">
+                    <strong>Approval needed</strong>
+                    <p>Run is paused on step {activeRun.checkpoint.awaitingApprovalForStepId}.</p>
+                    <button className="secondary-button" onClick={() => approveAndResume(activeRun.id)} disabled={busy}>
+                      Approve &amp; resume
+                    </button>
+                  </div>
+                ) : null}
+                <div className="event-stream compact">
+                  {recentEvents.length > 0 ? (
+                    recentEvents.map((event) => (
+                      <div key={event.id} className="event-row">
+                        <span className="event-time">{formatTime(event.at)}</span>
+                        <div>
+                          <strong>{event.type}</strong>
+                          <p>{event.message}</p>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="empty-state compact">
+                      <strong>No live events yet.</strong>
+                      <p>The agent will stream progress here as soon as execution begins.</p>
+                    </div>
+                  )}
+                </div>
+                {screenshotArtifact ? (
+                  <div className="artifact-preview">
+                    <strong>Latest screenshot</strong>
+                    {artifactUrl((screenshotArtifact.value as { path?: unknown }).path) ? (
+                      <img
+                        className="artifact-image"
+                        src={artifactUrl((screenshotArtifact.value as { path?: unknown }).path) ?? undefined}
+                        alt={screenshotArtifact.label}
+                      />
+                    ) : null}
+                  </div>
+                ) : null}
+              </article>
             ) : null}
-          </div>
 
-          {activeRun?.status === "completed" ? (
-            <div className="result-grid">
-              <div className="result-summary">
-                <strong>Completed goal</strong>
-                <p>{activeRun.goal}</p>
-                <p className="muted">Finished at {activeRun.updatedAt}</p>
+            {activeRun?.status === "completed" ? (
+              <article className="chat-message assistant result-card">
+                <div className="chat-meta">
+                  <span>Legwork</span>
+                  <span>Complete</span>
+                </div>
+                <h2>Results are ready</h2>
+                <p>{runSummary(activeRun)}</p>
                 {summaryArtifact ? (
                   <div className="summary-block">
                     <strong>Final summary</strong>
@@ -596,203 +687,260 @@ function GeneralVAView() {
                     <pre>{JSON.stringify(summaryArtifact.value, null, 2)}</pre>
                   </div>
                 ) : null}
-              </div>
-
-              <div className="result-artifacts">
-                <strong>Artifacts</strong>
-                {outputs.length > 0 ? (
-                  outputs.map((output, index) => {
-                    const path = output.value && typeof output.value === "object" ? artifactUrl((output.value as { path?: unknown }).path) : null;
-                    return (
-                      <div key={`${output.label}-${index}`} className="artifact-card">
-                        <div className="artifact-head">
-                          <strong>{output.label}</strong>
-                          {path ? <a href={path} target="_blank" rel="noreferrer">Open</a> : null}
+                <div className="result-actions">
+                  <button className="secondary-button" onClick={() => saveWorkflow(activeRun.id)} disabled={busy}>
+                    Save workflow
+                  </button>
+                </div>
+                <div className="result-artifacts">
+                  <strong>Artifacts</strong>
+                  {outputs.length > 0 ? (
+                    outputs.map((output, index) => {
+                      const path = output.value && typeof output.value === "object" ? artifactUrl((output.value as { path?: unknown }).path) : null;
+                      return (
+                        <div key={`${output.label}-${index}`} className="artifact-card">
+                          <div className="artifact-head">
+                            <strong>{output.label}</strong>
+                            {path ? (
+                              <a href={path} target="_blank" rel="noreferrer">
+                                Open
+                              </a>
+                            ) : null}
+                          </div>
+                          <pre>{JSON.stringify(output.value, null, 2)}</pre>
+                          {path ? <img src={path} alt={output.label} className="artifact-image" /> : null}
                         </div>
-                        <pre>{JSON.stringify(output.value, null, 2)}</pre>
-                        {path ? <img src={path} alt={output.label} className="artifact-image" /> : null}
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="empty-state compact">
-                    <strong>No artifacts yet.</strong>
-                    <p>When browser steps collect screenshots or extracted data, they appear here.</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="empty-state">
-              <strong>Awaiting completion.</strong>
-              <p>The final result view appears once the run finishes.</p>
-            </div>
-          )}
-        </article>
+                      );
+                    })
+                  ) : (
+                    <div className="empty-state compact">
+                      <strong>No artifacts yet.</strong>
+                      <p>When browser steps collect screenshots or extracted data, they appear here.</p>
+                    </div>
+                  )}
+                </div>
+              </article>
+            ) : null}
 
-        <article className="panel panel-summary">
-          <div className="panel-header">
-            <div>
-              <h2>Run history</h2>
-              <p className="muted">Recent runs, status changes, and any failures.</p>
-            </div>
-            <span className="panel-badge">{runs.length} total</span>
-          </div>
-          <div className="history-list">
-            {runs.length > 0 ? (
-              runs.slice(0, 6).map((run) => (
-                <button key={run.id} className="history-row" onClick={() => setActiveRunId(run.id)}>
-                  <div>
-                    <strong>{run.goal}</strong>
-                    <p>{new Date(run.createdAt).toLocaleString()}</p>
-                  </div>
-                  <span className={`pill ${run.status}`}>{run.status}</span>
-                </button>
-              ))
-            ) : (
-              <div className="empty-state compact">
-                <strong>No runs yet.</strong>
-                <p>Your first run will appear here.</p>
+            {messages.length === 1 && !activePlan && !activeRun ? (
+              <div className="empty-thread">
+                <strong>No conversation yet.</strong>
+                <p>Type a goal below to start a new autonomous task.</p>
               </div>
-            )}
+            ) : null}
           </div>
-        </article>
-      </section>
 
-      <section className="secondary-section">
-        <details className="detail-card">
-          <summary>Runtime credentials</summary>
-          <div className="detail-grid">
-            <div className="detail-copy">
-              <p className="muted">Create an in-memory credential session for authenticated browser work. Nothing is written to disk.</p>
-            </div>
-            <div className="detail-form">
-              <label className="field">
-                <span className="field-label">Session label</span>
-                <input value={credentialLabel} onChange={(event) => setCredentialLabel(event.target.value)} placeholder="Work portal" />
-              </label>
-              <label className="field">
-                <span className="field-label">Username or email</span>
-                <input value={credentialUsername} onChange={(event) => setCredentialUsername(event.target.value)} autoComplete="off" />
-              </label>
-              <label className="field">
-                <span className="field-label">Password</span>
-                <input value={credentialPassword} onChange={(event) => setCredentialPassword(event.target.value)} type="password" autoComplete="off" />
-              </label>
-              <label className="field">
-                <span className="field-label">One-time code</span>
-                <input value={credentialOtp} onChange={(event) => setCredentialOtp(event.target.value)} autoComplete="off" />
-              </label>
-              <label className="field">
-                <span className="field-label">Notes</span>
-                <textarea value={credentialNotes} onChange={(event) => setCredentialNotes(event.target.value)} rows={3} />
-              </label>
-              <button className="secondary-button" onClick={createCredentialSession} disabled={busy}>
-                Create runtime session
+          <div className="composer">
+            <label className="field field-goal">
+              <span className="field-label">Your request</span>
+              <textarea
+                value={goal}
+                onChange={(event) => setGoal(event.target.value)}
+                rows={5}
+                placeholder="For example: compare business insurance quotes, log into my account, and put the results in a spreadsheet."
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    if (composerMode === "run") {
+                      void handleRun();
+                    } else {
+                      void handlePlan();
+                    }
+                  }
+                }}
+              />
+            </label>
+            <div className="composer-actions">
+              <button
+                onClick={() => void handlePlan()}
+                disabled={busy || !goal.trim()}
+                className="secondary-button"
+              >
+                Generate plan
               </button>
-              <div className="session-list">
-                {credentialSessions.map((session) => (
-                  <div key={session.id} className="session-row">
-                    <div>
-                      <strong>{session.label || session.id}</strong>
-                      <p>{session.expiresAt}</p>
-                    </div>
-                    <span className="pill running">active</span>
-                  </div>
-                ))}
+              <button
+                onClick={() => void handleRun()}
+                disabled={busy || !goal.trim()}
+                className="primary-button"
+              >
+                Approve &amp; run
+              </button>
+              <button
+                onClick={() => setComposerMode((mode) => (mode === "plan" ? "run" : "plan"))}
+                className="ghost-button"
+                type="button"
+              >
+                Composer: {composerMode === "plan" ? "plan" : "run"}
+              </button>
+            </div>
+            <p className="composer-hint">
+              Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to submit. I will only stop for approval, blocked pages, or genuinely high-risk actions.
+            </p>
+            {notice ? <div className="notice">{notice}</div> : null}
+            {error ? <div className="error">{error}</div> : null}
+          </div>
+        </main>
+
+        <aside className="sidebar">
+          <section className="panel sidebar-panel">
+            <div className="panel-header">
+              <div>
+                <h2>Run context</h2>
+                <p className="muted">Credentials, inputs, and approvals stay secondary to the conversation.</p>
               </div>
             </div>
-          </div>
-        </details>
-
-        <details className="detail-card">
-          <summary>Context and preferences</summary>
-          <div className="detail-grid">
-            <div className="detail-copy">
-              <p className="muted">Use this area for resume text, profile links, constraints, and preference hints. It feeds the planner but stays out of the main flow.</p>
-            </div>
-            <div className="detail-form">
-              <label className="field">
-                <span className="field-label">Context summary</span>
-                <textarea value={contextSummary} onChange={(event) => setContextSummary(event.target.value)} rows={2} />
-              </label>
-              <label className="field">
-                <span className="field-label">Resume text</span>
-                <textarea value={resumeText} onChange={(event) => setResumeText(event.target.value)} rows={4} />
-              </label>
-              <label className="field">
-                <span className="field-label">Preferences JSON</span>
-                <textarea value={preferencesJson} onChange={(event) => setPreferencesJson(event.target.value)} rows={4} />
-              </label>
-              <label className="field">
-                <span className="field-label">Constraints</span>
-                <textarea value={constraints} onChange={(event) => setConstraints(event.target.value)} rows={3} />
-              </label>
-              <label className="field">
-                <span className="field-label">Account hints</span>
-                <textarea value={accountHints} onChange={(event) => setAccountHints(event.target.value)} rows={2} />
-              </label>
-            </div>
-          </div>
-        </details>
-
-        <details className="detail-card">
-          <summary>Workflows and self-improvement</summary>
-          <div className="detail-grid">
-            <div className="detail-copy">
-              <p className="muted">Successful runs can be saved as reusable workflows. The self-improvement layer observes history and generates proposals, but it never merges to main.</p>
-              <div className="actions-inline">
-                <button className="secondary-button" onClick={analyzeImprovement} disabled={busy}>
-                  Analyze history
+            <details open className="detail-card compact-card">
+              <summary>Runtime credentials</summary>
+              <div className="detail-stack">
+                <p className="muted">Create an in-memory credential session for authenticated browser work. Nothing is written to disk.</p>
+                <label className="field">
+                  <span className="field-label">Session label</span>
+                  <input value={credentialLabel} onChange={(event) => setCredentialLabel(event.target.value)} placeholder="Work portal" />
+                </label>
+                <label className="field">
+                  <span className="field-label">Username or email</span>
+                  <input value={credentialUsername} onChange={(event) => setCredentialUsername(event.target.value)} autoComplete="off" />
+                </label>
+                <label className="field">
+                  <span className="field-label">Password</span>
+                  <input value={credentialPassword} onChange={(event) => setCredentialPassword(event.target.value)} type="password" autoComplete="off" />
+                </label>
+                <label className="field">
+                  <span className="field-label">One-time code</span>
+                  <input value={credentialOtp} onChange={(event) => setCredentialOtp(event.target.value)} autoComplete="off" />
+                </label>
+                <label className="field">
+                  <span className="field-label">Notes</span>
+                  <textarea value={credentialNotes} onChange={(event) => setCredentialNotes(event.target.value)} rows={3} />
+                </label>
+                <button className="secondary-button" onClick={() => void createCredentialSession()} disabled={busy}>
+                  Create runtime session
                 </button>
-              </div>
-              {improvementSummary ? <pre>{JSON.stringify(improvementSummary, null, 2)}</pre> : null}
-            </div>
-            <div className="detail-form">
-              <div className="mini-list">
-                {workflows.length > 0 ? (
-                  workflows.map((workflow) => (
-                    <div key={workflow.id} className="mini-row">
-                      <div>
-                        <strong>{workflow.name}</strong>
-                        <p>{workflow.description}</p>
+                <div className="mini-list">
+                  {credentialSessions.length > 0 ? (
+                    credentialSessions.map((session) => (
+                      <div key={session.id} className="mini-row">
+                        <div>
+                          <strong>{session.label || session.id}</strong>
+                          <p>{session.expiresAt}</p>
+                        </div>
+                        <span className="pill running">active</span>
                       </div>
-                      <span className="pill workflow">saved</span>
+                    ))
+                  ) : (
+                    <div className="empty-state compact">
+                      <strong>No runtime session yet.</strong>
+                      <p>Create one when a goal needs a login.</p>
                     </div>
-                  ))
-                ) : (
-                  <div className="empty-state compact">
-                    <strong>No workflows yet.</strong>
-                    <p>Save a successful run to reuse it later.</p>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
-              <div className="mini-list">
-                {agents.map((agent) => (
-                  <div key={agent.id} className="mini-row">
-                    <div>
-                      <strong>{agent.title}</strong>
-                      <p>{agent.mission}</p>
+            </details>
+
+            <details className="detail-card compact-card">
+              <summary>Context and preferences</summary>
+              <div className="detail-stack">
+                <label className="field">
+                  <span className="field-label">Context summary</span>
+                  <textarea value={contextSummary} onChange={(event) => setContextSummary(event.target.value)} rows={2} />
+                </label>
+                <label className="field">
+                  <span className="field-label">Resume text</span>
+                  <textarea value={resumeText} onChange={(event) => setResumeText(event.target.value)} rows={4} />
+                </label>
+                <label className="field">
+                  <span className="field-label">Preferences JSON</span>
+                  <textarea value={preferencesJson} onChange={(event) => setPreferencesJson(event.target.value)} rows={4} />
+                </label>
+                <label className="field">
+                  <span className="field-label">Constraints</span>
+                  <textarea value={constraints} onChange={(event) => setConstraints(event.target.value)} rows={3} />
+                </label>
+                <label className="field">
+                  <span className="field-label">Account hints</span>
+                  <textarea value={accountHints} onChange={(event) => setAccountHints(event.target.value)} rows={2} />
+                </label>
+              </div>
+            </details>
+
+            <details className="detail-card compact-card">
+              <summary>History and self-improvement</summary>
+              <div className="detail-stack">
+                <div className="actions-inline">
+                  <button className="secondary-button" onClick={() => void analyzeImprovement()} disabled={busy}>
+                    Analyze history
+                  </button>
+                </div>
+                {improvementSummary ? <pre>{JSON.stringify(improvementSummary, null, 2)}</pre> : null}
+                <div className="mini-list">
+                  {workflows.length > 0 ? (
+                    workflows.map((workflow) => (
+                      <div key={workflow.id} className="mini-row">
+                        <div>
+                          <strong>{workflow.name}</strong>
+                          <p>{workflow.description}</p>
+                        </div>
+                        <span className="pill workflow">saved</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="empty-state compact">
+                      <strong>No workflows yet.</strong>
+                      <p>Save a successful run to reuse it later.</p>
                     </div>
-                    <span className="pill running">{agent.id}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="mini-list">
-                {improvementProposals.map((proposal) => (
-                  <div key={proposal.id} className="mini-row">
-                    <div>
-                      <strong>{proposal.title}</strong>
-                      <p>{proposal.problem}</p>
+                  )}
+                </div>
+                <div className="mini-list">
+                  {agents.map((agent) => (
+                    <div key={agent.id} className="mini-row">
+                      <div>
+                        <strong>{agent.title}</strong>
+                        <p>{agent.mission}</p>
+                      </div>
+                      <span className="pill running">{agent.id}</span>
                     </div>
-                    <span className="pill">{proposal.targetAgent}</span>
-                  </div>
-                ))}
+                  ))}
+                </div>
+                <div className="mini-list">
+                  {improvementProposals.map((proposal) => (
+                    <div key={proposal.id} className="mini-row">
+                      <div>
+                        <strong>{proposal.title}</strong>
+                        <p>{proposal.problem}</p>
+                      </div>
+                      <span className="pill">{proposal.targetAgent}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
-          </div>
-        </details>
-      </section>
+            </details>
+
+            <details className="detail-card compact-card">
+              <summary>Run history</summary>
+              <div className="detail-stack">
+                <div className="history-list">
+                  {runs.length > 0 ? (
+                    runs.slice(0, 8).map((run) => (
+                      <button key={run.id} className="history-row" onClick={() => setActiveRunId(run.id)}>
+                        <div>
+                          <strong>{run.goal}</strong>
+                          <p>{new Date(run.createdAt).toLocaleString()}</p>
+                        </div>
+                        <span className={`pill ${run.status}`}>{run.status}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="empty-state compact">
+                      <strong>No runs yet.</strong>
+                      <p>Your first run will appear here.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </details>
+          </section>
+        </aside>
+      </div>
     </div>
   );
 }

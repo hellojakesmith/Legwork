@@ -48,7 +48,7 @@ The app never stores raw secrets in `.legwork/` or in the repository. If the ser
 - Detached execution loop with live polling, approval gates, event logs, screenshot artifacts, and final run summary artifacts
 - File-backed run history and workflow saving
 - Controlled improvement foundation with internal agent definitions and PR creation hooks
-- React product UI centered on goal entry, task review, live execution, and final results
+- Chat-first React UI centered on goal entry, plan approval, live execution, and final results
 - Fresh planning from the current goal/context before review or execution, so the visible task list stays aligned with what will run
 - Secondary sidebar for credentials, context, history, and self-improvement controls
 - Dedicated Freelance Leads and Business Leads workspaces with saved-search workflows, ranked results, and detail drawers
